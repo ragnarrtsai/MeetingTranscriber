@@ -26,6 +26,7 @@ import shutil
 import threading
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
@@ -151,9 +152,10 @@ class Session:
         self._seq = 0
         self._t0 = 0.0            # 會議開始時刻，各軌的時間戳偏移都以它為基準
         self._lock = threading.Lock()
-        self.stats: dict = {"dropped_audio": 0, "dropped_partials": 0, "asr_ms": 0,
-                            "utterances": 0, "rejected_nonspeech": 0, "empty_text": 0,
-                            "asr_loops": 0}
+        self.stats: dict = {"dropped_audio": 0, "dropped_partials": 0, "asr_ms": 0, "utterances": 0,
+                            "rejected_nonspeech": 0, "empty_text": 0, "asr_loops": 0,
+                            "recent_db": []}
+        self._recent_db: deque[float] = deque(maxlen=30)
 
     # ---------- 軌道 ----------
 
@@ -523,6 +525,11 @@ class Session:
                 self.stats["dropped_partials"] += 1
             return
 
+        # 佔位列。積壓時暫定稿會被丟掉，只剩這個事件能讓畫面有反應。
+        self._emit({"type": "queued", "track": track.name, "utt": u.id,
+                    "start_ms": u.start_ms + track.offset_ms,
+                    "end_ms": u.end_ms + track.offset_ms})
+
         if self.cfg.spool_audio:
             u = self._spool_utterance(track, u)
 
@@ -536,9 +543,16 @@ class Session:
         except queue.Full:
             # 落後到連磁碟都不收了。這是最後一道，只可能在 ASR 長時間遠慢於即時發生。
             self._release_spool(u)
+            self._unqueue(track, u, "backlog")
             self._emit({"type": "error", "where": "backlog",
                         "detail": f"待處理已達 {self.cfg.spool_max_pending} 句，"
                                   f"這一句被丟棄。請減少模型數量或換小一點的模型。"})
+
+    def _unqueue(self, track: Track, u: Utterance, reason: str) -> None:
+        """這一句不會有逐字稿了，收掉佔位列。"""
+        if u.is_final:
+            self._emit({"type": "unqueued", "track": track.name, "utt": u.id,
+                        "reason": reason})
 
     def _work_loop(self) -> None:
         while True:
@@ -553,6 +567,7 @@ class Session:
             try:
                 self._process(track, u)
             except Exception:
+                self._unqueue(track, u, "error")
                 self._emit({"type": "error", "where": f"asr:{track.name}",
                             "detail": traceback.format_exc()})
             finally:
@@ -570,11 +585,17 @@ class Session:
             data, _ = sf.read(u.path, dtype="float32")
             audio = np.asarray(data, dtype=np.float32).reshape(-1)
         if not audio.size:
+            self._unqueue(track, u, "empty_audio")
             return
 
-        if 0 < cfg.speech_gate_db > modulation_depth_db(audio):
-            self.stats["rejected_nonspeech"] += 1
-            return
+        if u.is_final:
+            depth = modulation_depth_db(audio)
+            self._recent_db.append(round(depth, 1))
+            self.stats["recent_db"] = list(self._recent_db)
+            if 0 < cfg.speech_gate_db > depth:
+                self.stats["rejected_nonspeech"] += 1
+                self._unqueue(track, u, "nonspeech")
+                return
 
         backend = asr_mod.get_backend(cfg.model_id)
         res = backend.transcribe(audio, prompt=cfg.prompt, language=cfg.language)
@@ -590,6 +611,7 @@ class Session:
 
         if not res.text.strip():
             self.stats["empty_text"] += 1
+            self._unqueue(track, u, "empty_text")
             return
 
         # 其餘選到的模型逐一跑同一段音訊。序列化執行 —— GPU 本來就一次一個，
@@ -636,6 +658,7 @@ class Session:
         self.stats["utterances"] += 1
 
         self._emit({"type": "segment", "id": seg_id, "seq": seq, "track": track.name,
+                    "utt": u.id,
                     "start_ms": start_ms, "end_ms": end_ms, "text": res.text,
                     "speaker_key": key, "speaker_label": label, "lang": res.lang,
                     "model": cfg.model_id, "alts": alts,
