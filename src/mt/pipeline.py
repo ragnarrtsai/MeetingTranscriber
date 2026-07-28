@@ -26,7 +26,7 @@ import shutil
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +91,10 @@ class SessionConfig:
     def compare_ids(self) -> list[str]:
         """只做並排比對的模型。"""
         return [m for m in self.model_ids[1:] if m != self.model_id]
+
+
+# 可以寫的欄位。model_id / compare_ids 是唯讀 property，setattr 會炸。
+SETTABLE_FIELDS = frozenset(f.name for f in fields(SessionConfig))
 
 
 @dataclass
@@ -431,7 +435,7 @@ class Session:
                         setattr(self.cfg.vad, vk, vv)
                 for t in self._tracks.values():
                     t.seg.cfg = self.cfg.vad
-            elif hasattr(self.cfg, k):
+            elif k in SETTABLE_FIELDS:
                 setattr(self.cfg, k, v)
         for t in self._tracks.values():
             t.clusterer.cluster_threshold = self.cfg.cluster_threshold
