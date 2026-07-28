@@ -383,13 +383,10 @@ class Session:
                 t.thread.join(timeout=8)      # flush() 會在這裡補送最後一句
         self._jobs.put(None)
 
-        pending = self._jobs.qsize()
-        if pending > 1:
-            self.draining = True
-            self._emit({"type": "draining", **self.backlog_dict()})
-            threading.Thread(target=self._drain, name="drain", daemon=True).start()
-        else:
-            self._finalize()
+        # 一律在背景排空 —— 佇列長度不含正在跑的那一句，不能拿來判斷有沒有事做
+        self.draining = True
+        self._emit({"type": "draining", **self.backlog_dict()})
+        threading.Thread(target=self._drain, name="drain", daemon=True).start()
 
     def _drain(self) -> None:
         if self._worker:
@@ -398,7 +395,7 @@ class Session:
 
     def _finalize(self) -> None:
         if self._worker and self._worker.is_alive():
-            self._worker.join(timeout=10)
+            self._worker.join()
         self.draining = False
         if self.meeting_id is not None:
             self.store.end_meeting(self.meeting_id)

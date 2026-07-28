@@ -669,7 +669,7 @@ function onEvent(ev) {
     case 'draining':
       // 已停止收音但還在轉寫。這時不能當成結束 —— 段落還會繼續進來。
       renderBacklog(ev);
-      setState(false, `收尾中 (${ev.pending})`);
+      setState(false, `收尾中 (${ev.pending})`, true);
       toast(`已停止收音。還有 ${ev.pending} 句在轉寫，轉完才會結束這場會議。`);
       break;
     case 'level': {
@@ -737,15 +737,21 @@ function onEvent(ev) {
   }
 }
 
-function setState(running, label) {
+function setState(running, label, draining) {
   S.running = running;
+  S.draining = !!draining;
+  // 收尾中還在轉寫，開新一場會把它蓋掉
+  const busy = running || S.draining;
   const st = $('#state');
   st.textContent = label || (running ? '錄音中' : '待機');
-  st.classList.toggle('on', running);
-  $('#btnStart').disabled = running;
+  st.classList.toggle('on', busy);
+  $('#btnStart').disabled = busy;
   $('#btnStop').disabled = !running;
   // 分頁音訊必須在錄音開始後才能加 —— 它是加到目前這場會議上的一條軌
   $('#btnTab').disabled = !running;
+  // 麥克風已經開著，改裝置不會生效
+  $('#device').disabled = busy;
+  $('#device').title = busy ? '錄音或收尾中不能換裝置，要等這一場結束' : '';
   $('#btnTab').title = running
     ? '擷取 Chrome 分頁的聲音（YouTube、Google Meet 等）。不需安裝任何東西。'
     : '先開始錄音，才能加收分頁音訊。';
@@ -982,7 +988,7 @@ $('#tabP').onclick = () => { $('#tabP').classList.add('on'); $('#tabH').classLis
   $('#prompt').value = default_prompt;
   applyConfigToUI(status.config);
   renderBacklog(status.backlog);
-  setState(status.running);
+  setState(status.running, null, !!(status.backlog && status.backlog.draining));
   if (status.meeting_id) { S.liveId = status.meeting_id; openMeeting(status.meeting_id); }
   await loadMeetings();
   // 待機時直接開最近一場，不要讓人對著空面板
