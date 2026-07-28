@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     asr_model     TEXT    NOT NULL,
     embed_model   TEXT    NOT NULL,
     embed_dim     INTEGER NOT NULL,
-    notes         TEXT    NOT NULL DEFAULT ''
+    notes         TEXT    NOT NULL DEFAULT '',
+    pinned        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -138,7 +139,15 @@ class Store:
         self._db.execute("PRAGMA foreign_keys = ON")
         self._db.execute("PRAGMA journal_mode = WAL")
         self._db.executescript(SCHEMA)
+        self._migrate()
         self._db.commit()
+
+    def _migrate(self) -> None:
+        """補上舊資料庫缺的欄位。CREATE TABLE IF NOT EXISTS 不會改既有的表。"""
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(meetings)")}
+        if "pinned" not in have:
+            self._db.execute(
+                "ALTER TABLE meetings ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._db.close()
@@ -170,6 +179,11 @@ class Store:
         self._db.execute("UPDATE meetings SET title=? WHERE id=?", (title, meeting_id))
         self._db.commit()
 
+    def set_meeting_pinned(self, meeting_id: int, pinned: bool) -> None:
+        self._db.execute("UPDATE meetings SET pinned=? WHERE id=?",
+                         (1 if pinned else 0, meeting_id))
+        self._db.commit()
+
     def delete_meeting(self, meeting_id: int) -> None:
         self._db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         self._db.commit()
@@ -179,7 +193,7 @@ class Store:
             "SELECT m.*,"
             " (SELECT COUNT(*) FROM segments s WHERE s.meeting_id=m.id) AS n_segments,"
             " (SELECT COUNT(*) FROM speakers k WHERE k.meeting_id=m.id) AS n_speakers"
-            " FROM meetings m ORDER BY m.started_at DESC"
+            " FROM meetings m ORDER BY m.pinned DESC, m.started_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 

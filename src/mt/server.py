@@ -277,12 +277,14 @@ def create_app(db_path: Path | str = DB_PATH) -> FastAPI:
         body = await req.json()
         if "title" in body:
             store.rename_meeting(mid, body["title"])
+        if "pinned" in body:
+            store.set_meeting_pinned(mid, bool(body["pinned"]))
         return {"ok": True}
 
     @app.delete("/api/meetings/{mid}")
     async def delete_meeting(mid: int) -> dict:
-        if session.running and session.meeting_id == mid:
-            raise HTTPException(400, "這場正在錄音中，先停止再刪")
+        if (session.running or session.draining) and session.meeting_id == mid:
+            raise HTTPException(400, "這場還在錄音或收尾中，等它結束再刪")
         store.delete_meeting(mid)
         return {"ok": True}
 

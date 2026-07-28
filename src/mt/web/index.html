@@ -103,7 +103,17 @@ section.transcript{flex:1;display:flex;flex-direction:column;min-width:0}
   cursor:pointer;background:var(--panel2)}
 .item:hover{border-color:var(--accent)}
 .item.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
-.item .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item{position:relative}
+.item .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  padding-right:26px}
+/* 置頂在右上、刪除在右下：兩個動作的後果差太多，不能放在誤觸得到的距離內 */
+.item .pin,.item .del{position:absolute;right:5px;cursor:pointer;color:var(--faint);
+  line-height:1;padding:3px 4px;border-radius:5px}
+.item .pin{top:5px;font-size:12px;filter:grayscale(1);opacity:.5}
+.item .pin:hover{filter:none;opacity:1;background:var(--bg)}
+.item .pin.on{filter:none;opacity:1}
+.item .del{bottom:5px;font-size:11px;opacity:.55}
+.item .del:hover{opacity:1;color:var(--bad);background:var(--bg)}
 
 /* ---- transcript ---- */
 .seg{display:flex;gap:10px;padding:5px 0;border-radius:8px}
@@ -831,7 +841,26 @@ async function loadMeetings() {
     const live = S.running && m.id === S.liveId;
     d.innerHTML = `<div class="t">${esc(m.title)}${live ? ' <span class="badge" style="color:var(--good);border-color:var(--good)">錄音中</span>' : ''}</div>`
       + `<div class="tiny faint">${m.n_segments} 段 · ${m.n_speakers} 位說話者</div>`
-      + `<div class="tiny faint mono">${esc(m.asr_model)}</div>`;
+      + `<div class="tiny faint mono">${esc(modelName(m.asr_model))}</div>`
+      + `<span class="pin${m.pinned ? ' on' : ''}" title="${m.pinned ? '取消置頂' : '置頂'}">📌</span>`
+      + `<span class="del" title="刪除這場">刪除</span>`;
+    d.querySelector('.pin').onclick = async e => {
+      e.stopPropagation();
+      try { await api('PATCH', `/api/meetings/${m.id}`, {pinned: !m.pinned}); await loadMeetings(); }
+      catch (err) { toast(err.message, true); }
+    };
+    d.querySelector('.del').onclick = async e => {
+      e.stopPropagation();
+      if (!confirm(`刪除「${m.title}」？逐字稿與這場的聲紋都會一起刪掉，無法復原。`)) return;
+      try {
+        await api('DELETE', `/api/meetings/${m.id}`);
+        if (S.viewId === m.id) S.viewId = null;
+        await loadMeetings();
+        if (!S.viewId && S.meetings.length) await openMeeting(S.meetings[0].id);
+        else if (!S.meetings.length) { S.segs = new Map(); S.speakers = []; paintAll();
+                                       $('#mtitle').textContent = '—'; $('#mmeta').textContent = ''; }
+      } catch (err) { toast(err.message, true); }
+    };
     d.onclick = () => openMeeting(m.id);
     $('#paneH').appendChild(d);
   }
