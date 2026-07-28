@@ -62,7 +62,7 @@ class SessionConfig:
     device_index: int | None = None
     enable_mic: bool = True
     embed_device: str = "cpu"
-    cluster_threshold: float = 0.55
+    cluster_threshold: float = 0.45
     person_threshold: float = 0.70
     recluster_every: int = 6            # 每累積幾句就全域重算一次（追溯修正）
     enable_diarization: bool = True
@@ -611,7 +611,7 @@ class Session:
         if cfg.enable_diarization:
             vec = self._embedder.embed(audio)
             if vec is not None:
-                assign = track.clusterer.assign(vec)
+                assign = track.clusterer.assign(vec, duration_ms=end_ms - start_ms)
 
         with self._lock:
             self._seq += 1
@@ -669,7 +669,8 @@ class Session:
             return
         prev = dict(zip(track.seg_ids, track.seg_keys))
         prev_keys = [prev.get(sid, "") for sid in ids]
-        new_keys = track.clusterer.recluster(mat, prev_keys)
+        durs = self.store.segment_durations(self.meeting_id, ids)
+        new_keys = track.clusterer.recluster(mat, prev_keys, durations_ms=durs)
         changed = [(sid, k) for sid, k, old in zip(ids, new_keys, prev_keys) if k != old]
         if not changed:
             return

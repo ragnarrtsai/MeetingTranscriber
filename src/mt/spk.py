@@ -81,16 +81,17 @@ class Assignment:
 class OnlineClusterer:
     """一句一句進來的線上分群。
 
-    cluster_threshold: 低於此相似度就開新的說話者。ECAPA 正規化後的餘弦相似度，
-      同一人通常 0.6+、不同人多在 0.35 以下，0.55 是偏保守的起點。
-      實際值受麥克風與環境影響很大，所以開成 UI 可調。
+    cluster_threshold: 與群心的餘弦相似度低於此就開新的說話者。
     person_threshold: 人物庫比對門檻，刻意設得更高（陷阱三）。
+    min_new_speaker_ms: 比這短的語句不准開新說話者，只能併進既有的。
     """
 
-    def __init__(self, cluster_threshold: float = 0.55, person_threshold: float = 0.70,
-                 person_margin: float = 0.06, key_prefix: str = ""):
+    def __init__(self, cluster_threshold: float = 0.45, person_threshold: float = 0.70,
+                 person_margin: float = 0.06, key_prefix: str = "",
+                 min_new_speaker_ms: int = 2000):
         self.cluster_threshold = cluster_threshold
         self.person_threshold = person_threshold
+        self.min_new_speaker_ms = min_new_speaker_ms
         self.person_margin = person_margin      # 與第二名的差距，太接近就不敢認
         # 每一軌各自分群，代號不能撞。麥克風用 A/B/C，系統音訊用 RA/RB/RC。
         # 分軌的理由見 CLAUDE.md：兩個來源的通道特性不同，混在一起分群
@@ -119,7 +120,7 @@ class OnlineClusterer:
                 return self.key_prefix + k
         return f"{self.key_prefix}S{len(self._sums) + 1}"
 
-    def assign(self, vec: np.ndarray) -> Assignment:
+    def assign(self, vec: np.ndarray, duration_ms: int | None = None) -> Assignment:
         vec = _norm(vec)
         best_key, best = "", -1.0
         for k in self._sums:
@@ -127,7 +128,8 @@ class OnlineClusterer:
             if s > best:
                 best_key, best = k, s
 
-        if best_key and best >= self.cluster_threshold:
+        too_short = duration_ms is not None and duration_ms < self.min_new_speaker_ms
+        if best_key and (best >= self.cluster_threshold or too_short):
             key, is_new = best_key, False
         else:
             key, is_new, best = self._next_key(), True, best
@@ -166,28 +168,37 @@ class OnlineClusterer:
     # ---------- 追溯修正 ----------
 
     def recluster(self, vectors: np.ndarray, prev_keys: list[str],
-                  threshold: float | None = None) -> list[str]:
+                  threshold: float | None = None,
+                  durations_ms: list[int] | None = None) -> list[str]:
         """對整場會議的向量重新分群，回傳每段新的 speaker_key。
 
-        分群本質上是全域操作，線上版本只是妥協。這裡用平均連結階層式分群
-        重算一次，再把新群對回舊代號（取重疊最多的），讓已命名的說話者
-        代號不會在使用者眼前跳掉。
+        分群本質上是全域操作，線上版本只是妥協。這裡用階層式分群重算一次，
+        再把新群對回舊代號（取重疊最多的），讓已命名的說話者代號不會跳掉。
+
+        只有夠長的段落參與決定群數，短的最後併進最像的那一群。
         """
         n = len(vectors)
         if n == 0:
             return []
         thr = self.cluster_threshold if threshold is None else threshold
         V = np.stack([_norm(v) for v in vectors])
-        clusters: list[list[int]] = [[i] for i in range(n)]
-        sim = V @ V.T
-        np.fill_diagonal(sim, -np.inf)
+        long_idx = [i for i in range(n)] if durations_ms is None else \
+            [i for i in range(n) if durations_ms[i] >= self.min_new_speaker_ms]
+        if not long_idx:                    # 全部都太短，那就全部一起看
+            long_idx = list(range(n))
+        short_idx = [i for i in range(n) if i not in set(long_idx)]
 
+        # 用群心比，跟 assign() 同一套標準
+        def cen(idxs: list[int]) -> np.ndarray:
+            return _norm(V[idxs].mean(axis=0))
+
+        clusters: list[list[int]] = [[i] for i in long_idx]
         while len(clusters) > 1:
             best, pair = -np.inf, None
             for a in range(len(clusters)):
+                ca = cen(clusters[a])
                 for b in range(a + 1, len(clusters)):
-                    sub = sim[np.ix_(clusters[a], clusters[b])]
-                    s = float(sub.mean())
+                    s = float(ca @ cen(clusters[b]))
                     if s > best:
                         best, pair = s, (a, b)
             if pair is None or best < thr:
@@ -195,6 +206,11 @@ class OnlineClusterer:
             a, b = pair
             clusters[a] = clusters[a] + clusters[b]
             clusters.pop(b)
+
+        # 太短的段落不參與決定群數，最後併進最像的那一群
+        for i in short_idx:
+            ci = max(range(len(clusters)), key=lambda c: float(V[i] @ cen(clusters[c])))
+            clusters[ci].append(i)
 
         # 新群對回舊代號：以重疊段數最多者優先，避免代號洗牌
         order = sorted(range(len(clusters)), key=lambda i: -len(clusters[i]))

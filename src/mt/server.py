@@ -296,9 +296,10 @@ def create_app(db_path: Path | str = DB_PATH) -> FastAPI:
             if len(ids) < 2:
                 continue
             prev = [by_id.get(i, "") for i in ids]
+            durs = store.segment_durations(mid, ids)
             c = OnlineClusterer(thr, session.cfg.person_threshold,
                                 key_prefix=TRACK_PREFIX.get(track, ""))
-            new = await loop.run_in_executor(None, c.recluster, mat, prev, thr)
+            new = await loop.run_in_executor(None, c.recluster, mat, prev, thr, durs)
             changed = [(i, k) for i, k, o in zip(ids, new, prev) if k != o]
             store.bulk_reassign(changed)
             total += len(changed)

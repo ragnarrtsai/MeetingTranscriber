@@ -297,6 +297,17 @@ class Store:
         mat = np.stack([_unblob(r["vector"]) for r in rows])
         return ids, mat
 
+    def segment_durations(self, meeting_id: int, ids: Sequence[int]) -> list[int]:
+        """依 ids 的順序回傳每段的長度（ms）。"""
+        if not ids:
+            return []
+        q = ",".join("?" * len(ids))
+        rows = self._db.execute(
+            f"SELECT id, end_ms - start_ms AS dur FROM segments"
+            f" WHERE meeting_id=? AND id IN ({q})", (meeting_id, *ids)).fetchall()
+        by_id = {int(r["id"]): int(r["dur"]) for r in rows}
+        return [by_id.get(int(i), 0) for i in ids]
+
     # ---------- speakers ----------
 
     def speakers(self, meeting_id: int) -> list[dict]:
