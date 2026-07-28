@@ -274,7 +274,7 @@ function toast(msg, bad) {
 }
 
 const S = {
-  running: false, liveId: null, viewId: null, filterSpk: '',
+  running: false, liveId: null, viewId: null, filterSpk: '', filterPeople: [],
   segs: new Map(), speakers: [], meetings: [], people: [], models: [],
   tracks: {}, tab: null, modelIds: [], installing: null, backlog: null,
 };
@@ -869,11 +869,36 @@ function setState(running, label, draining) {
 }
 
 /* ---------------- 側欄：歷史 ---------------- */
+function renderPeopleFilter() {
+  const on = new Set(S.filterPeople);
+  const chips = (S.people || []).map(p => {
+    const label = p.name || `訪客 ${p.uid}`;
+    return `<span class="mchip${on.has(p.uid) ? ' on' : ''}" data-uid="${esc(p.uid)}"
+      title="uid ${esc(p.uid)}">${esc(label)}</span>`;
+  }).join('');
+  if (!chips) return '';
+  return `<div class="note" style="padding:6px 8px">
+      <div class="tiny faint" style="margin-bottom:4px">只看有這些人的會議${
+        on.size ? `（已選 ${on.size}，取聯集）` : ''}</div>
+      <div class="row wrap" style="gap:4px">${chips}</div>
+    </div>`;
+}
+
 async function loadMeetings() {
-  const { meetings } = await api('GET', '/api/meetings');
+  const q = S.filterPeople.length ? `?people=${S.filterPeople.join(',')}` : '';
+  const { meetings } = await api('GET', `/api/meetings${q}`);
   S.meetings = meetings;
-  $('#paneH').innerHTML = meetings.length ? '' :
-    `<div class="note">還沒有會議記錄。錄一場就會出現在這裡，包含逐字稿與聲紋。</div>`;
+  $('#paneH').innerHTML = renderPeopleFilter() + (meetings.length ? '' :
+    `<div class="note">${S.filterPeople.length ? '選到的人物沒有出現在任何會議裡。'
+      : '還沒有會議記錄。錄一場就會出現在這裡，包含逐字稿與聲紋。'}</div>`);
+  for (const c of $('#paneH').querySelectorAll('.mchip[data-uid]')) {
+    c.onclick = () => {
+      const uid = c.dataset.uid;
+      S.filterPeople = S.filterPeople.includes(uid)
+        ? S.filterPeople.filter(x => x !== uid) : [...S.filterPeople, uid];
+      loadMeetings();
+    };
+  }
   for (const m of meetings) {
     const d = document.createElement('div');
     d.className = 'item' + (m.id === S.viewId ? ' on' : '');
@@ -923,6 +948,8 @@ async function openMeeting(id, keepScroll) {
 async function loadPeople() {
   const { people, embed_model } = await api('GET', '/api/people');
   S.people = people;
+  // 篩選器的名單來自這裡：人物改名或新增後要跟著更新
+  if ($('#paneH').querySelector('.mchip[data-uid]')) loadMeetings();
   const p = $('#paneP');
   p.innerHTML = `<div class="note">把逐字稿裡的「Speaker A」點開改成真名，那一群的聲紋就會存進這裡，
     下一場會議同一個人第一句話就能被認出來。<br><br>目前嵌入模型：<span class="mono">${esc(embed_model)}</span>
@@ -1167,6 +1194,8 @@ $('#tabP').onclick = () => { $('#tabP').classList.add('on'); $('#tabH').classLis
   renderBacklog(status.backlog);
   setState(status.running, null, !!(status.backlog && status.backlog.draining));
   if (status.meeting_id) { S.liveId = status.meeting_id; openMeeting(status.meeting_id); }
+  // 歷史的人物篩選器要用到人物清單，先抓一次
+  try { S.people = (await api('GET', '/api/people')).people; } catch (e) { S.people = []; }
   await loadMeetings();
   // 待機時直接開最近一場，不要讓人對著空面板
   if (!status.running && !S.viewId && S.meetings.length) await openMeeting(S.meetings[0].id);

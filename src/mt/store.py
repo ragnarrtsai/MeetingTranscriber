@@ -237,14 +237,20 @@ class Store:
         self._db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         self._db.commit()
 
-    def list_meetings(self) -> list[dict]:
-        rows = self._db.execute(
-            "SELECT m.*,"
-            " (SELECT COUNT(*) FROM segments s WHERE s.meeting_id=m.id) AS n_segments,"
-            " (SELECT COUNT(*) FROM speakers k WHERE k.meeting_id=m.id) AS n_speakers"
-            " FROM meetings m ORDER BY m.pinned DESC, m.started_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+    def list_meetings(self, person_uids: Sequence[str] | None = None) -> list[dict]:
+        """person_uids 給了就只留出現過其中任一人的會議（聯集）。"""
+        sql = ("SELECT m.*,"
+               " (SELECT COUNT(*) FROM segments s WHERE s.meeting_id=m.id) AS n_segments,"
+               " (SELECT COUNT(*) FROM speakers k WHERE k.meeting_id=m.id) AS n_speakers"
+               " FROM meetings m")
+        args: tuple = ()
+        if person_uids:
+            qs = ",".join("?" * len(person_uids))
+            sql += (f" WHERE EXISTS (SELECT 1 FROM speakers k JOIN people p ON p.id=k.person_id"
+                    f" WHERE k.meeting_id=m.id AND p.uid IN ({qs}))")
+            args = tuple(person_uids)
+        sql += " ORDER BY m.pinned DESC, m.started_at DESC"
+        return [dict(r) for r in self._db.execute(sql, args).fetchall()]
 
     def get_meeting(self, meeting_id: int) -> dict | None:
         r = self._db.execute("SELECT * FROM meetings WHERE id=?", (meeting_id,)).fetchone()

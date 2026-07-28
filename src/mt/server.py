@@ -261,8 +261,9 @@ def create_app(db_path: Path | str = DB_PATH) -> FastAPI:
     # ---------- 歷史 ----------
 
     @app.get("/api/meetings")
-    async def meetings() -> dict:
-        return {"meetings": store.list_meetings()}
+    async def meetings(people: str = "") -> dict:
+        uids = [x for x in people.split(",") if x]
+        return {"meetings": store.list_meetings(uids or None)}
 
     @app.get("/api/meetings/{mid}")
     async def meeting(mid: int) -> dict:
