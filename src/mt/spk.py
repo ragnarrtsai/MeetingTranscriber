@@ -5,7 +5,7 @@
    與語言無關，所以中英夾雜完全不影響這一層（CLAUDE.md「有利的兩點」之一）。
 2. 線上分群 —— 即時只能一句一句往現有群心靠，開頭幾句必然最不準。
 3. 開集比對 —— 有了人物庫，熟面孔第一句就能標對；但陌生人誤標成熟人比退回
-   「Speaker A」糟得多，所以人物比對的門檻明顯高於分群門檻。
+   「說話者 1」糟得多，所以人物比對的門檻明顯高於分群門檻。
 
 追溯修正的關鍵在 recluster()：線上結果只是暫時的，累積足夠向量後用全域
 階層式分群重算一次，把開頭標錯的段落改回來。UI 因此不能是 append-only。
@@ -25,7 +25,13 @@ EMBED_VERSION = "ecapa-voxceleb-1"     # 陷阱二：向量一定要帶版本
 # 症狀是比對分數莫名全面下降，而且極難診斷。
 EMBED_TAG = f"{EMBED_MODEL}@{EMBED_VERSION}"
 
-KEYS = [chr(ord("A") + i) for i in range(26)]
+# 代號用不設上限的序號。A~Z 只有 26 個，分群失準時很快就用完，
+# 而且撞到上限後會退成別的格式，同一場裡出現兩種代號更難看。
+def _keys(prefix: str = ""):
+    n = 1
+    while True:
+        yield f"{prefix}{n}"
+        n += 1
 
 
 def _norm(v: np.ndarray) -> np.ndarray:
@@ -115,10 +121,10 @@ class OnlineClusterer:
         return _norm(self._sums[key] / self._counts[key])
 
     def _next_key(self) -> str:
-        for k in KEYS:
-            if self.key_prefix + k not in self._sums:
-                return self.key_prefix + k
-        return f"{self.key_prefix}S{len(self._sums) + 1}"
+        for k in _keys(self.key_prefix):
+            if k not in self._sums:
+                return k
+        raise AssertionError("unreachable")
 
     def assign(self, vec: np.ndarray, duration_ms: int | None = None) -> Assignment:
         vec = _norm(vec)
@@ -159,7 +165,7 @@ class OnlineClusterer:
         top = scored[0]
         runner = scored[1][0] if len(scored) > 1 else -1.0
         # 兩道保險：分數要夠高，且要明顯贏過第二名。
-        # 寧可留在 Speaker A，也不要把陌生人叫成 Daniel。
+        # 寧可留在未命名狀態，也不要把陌生人叫成 Daniel。
         if top[0] >= self.person_threshold and (top[0] - runner) >= self.person_margin:
             self._pinned[key] = top[1]
             return top[1], top[2], top[0]
@@ -227,7 +233,7 @@ class OnlineClusterer:
                     assigned[ci] = k
                     used.add(k)
                     break
-        fresh = (self.key_prefix + k for k in KEYS if self.key_prefix + k not in used)
+        fresh = (k for k in _keys(self.key_prefix) if k not in used)
         for ci in order:
             if ci not in assigned:
                 assigned[ci] = next(fresh, f"{self.key_prefix}S{ci + 1}")

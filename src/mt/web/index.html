@@ -147,7 +147,6 @@ section.transcript{flex:1;display:flex;flex-direction:column;min-width:0}
 .seg .txt.typing::after{content:'▍';color:var(--accent);animation:blink .7s step-end infinite}
 @keyframes blink{50%{opacity:0}}
 #partial[hidden]{display:none}
-#partial[hidden]{display:none}
 .empty{color:var(--faint);text-align:center;padding:48px 12px}
 .badge{font-size:10px;border:1px solid var(--line);border-radius:4px;padding:0 4px;color:var(--faint)}
 .toast{position:fixed;right:14px;bottom:14px;max-width:420px;background:var(--panel);
@@ -160,7 +159,7 @@ section.transcript{flex:1;display:flex;flex-direction:column;min-width:0}
   padding:14px 16px;max-width:520px;width:100%;max-height:80vh;overflow-y:auto}
 .modal .row.dec{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
 .modal .seg-name{font-weight:600}
-border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+.note{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;
   font-size:12px;color:var(--dim);margin-bottom:8px}
 details summary{cursor:pointer;color:var(--dim);font-size:12px}
 </style>
@@ -207,7 +206,6 @@ details summary{cursor:pointer;color:var(--dim);font-size:12px}
       </div>
     </div>
   </div>
-  <details>  </div>
   <details>
     <summary>進階：混說提示詞、VAD 斷句</summary>
     <div class="row wrap" style="margin-top:6px">
@@ -449,7 +447,6 @@ function typeIn(el, text) {
   tick();
 }
 
-
 /* ---------------- 分頁音訊擷取 ----------------
    macOS 收系統音訊原本得裝 BlackHole 這類虛擬音訊裝置，而那需要管理者權限。
    Chrome 的 getDisplayMedia 可以擷取分頁音訊，不必安裝、不必改系統設定、
@@ -620,7 +617,7 @@ function speakerLabel(key, track) {
   if (!key) return '未分群';
   // 系統音訊那一軌的代號帶 R 前綴（RA / RB），顯示時拿掉並標成「遠端」
   const t = track || (sp && sp.track) || 'mic';
-  return t === 'system' ? `遠端 ${key.replace(/^R/, '')}` : `Speaker ${key}`;
+  return t === 'system' ? `遠端 ${key.replace(/^R/, '')}` : `說話者 ${key}`;
 }
 
 function renderSeg(seg) {
@@ -640,7 +637,7 @@ function renderSeg(seg) {
   if (track !== 'mic') bits.push(TRACK_NAME[track] || track);
   // 即時事件用 model，資料庫讀回來的欄位是 asr_model
   const model = seg.model || seg.asr_model;
-  if (model) bits.push(esc(model));
+  if (model) bits.push(esc(modelName(model)));
   if (seg.lang) bits.push(esc(seg.lang));
   if (seg.latency_ms) bits.push(`${seg.latency_ms}ms`);
   if (seg.spk_score != null) bits.push(`聲紋 ${seg.spk_score}`);
@@ -653,8 +650,8 @@ function renderSeg(seg) {
     `<div class="body">` +
       `<div class="txt" contenteditable="plaintext-only" spellcheck="false">${esc(seg.text)}</div>` +
       (seg.alts || []).map(a =>
-        `<div class="alt" title="${esc(a.model)} 對同一句話的輸出">`
-        + `<b>${esc(a.model)}</b>：${esc(a.text) || '<i>（空）</i>'}`
+        `<div class="alt" title="${esc(modelName(a.model))} 對同一句話的輸出">`
+        + `<b>${esc(modelName(a.model))}</b>：${esc(a.text) || '<i>（空）</i>'}`
         + (a.latency_ms ? ` <span class="tiny faint">${a.latency_ms}ms</span>` : '')
         + `</div>`).join('') +
       (bits.length ? `<div class="meta">${bits.join(' · ')}</div>` : '') +
@@ -951,7 +948,7 @@ async function loadPeople() {
   // 篩選器的名單來自這裡：人物改名或新增後要跟著更新
   if ($('#paneH').querySelector('.mchip[data-uid]')) loadMeetings();
   const p = $('#paneP');
-  p.innerHTML = `<div class="note">把逐字稿裡的「Speaker A」點開改成真名，那一群的聲紋就會存進這裡，
+  p.innerHTML = `<div class="note">把逐字稿裡的「說話者 1」點開改成真名，那一群的聲紋就會存進這裡，
     下一場會議同一個人第一句話就能被認出來。<br><br>目前嵌入模型：<span class="mono">${esc(embed_model)}</span>
     。換模型的話舊聲紋無法轉換，必須重建。</div>
     <div class="row" style="margin-bottom:8px">
@@ -1057,7 +1054,7 @@ $('#lines').addEventListener('click', async e => {
   const sp = S.speakers.find(s => s.speaker_key === key);
   const cur = (sp && (sp.label || sp.person_name)) || '';
   const name = prompt(
-    `Speaker ${key} 是誰？\n\n填入名字會把這一群的聲紋存進人物庫，之後的會議會自動認出來。\n留空則取消命名。`,
+    `說話者 ${key} 是誰？\n\n填入名字會把這一群的聲紋存進人物庫，之後的會議會自動認出來。\n留空則取消命名。`,
     cur);
   if (name === null) return;
   try {
@@ -1065,7 +1062,7 @@ $('#lines').addEventListener('click', async e => {
     S.speakers = r.speakers;
     for (const s of S.segs.values()) renderSeg(s);
     loadPeople();
-    if (name.trim()) toast(`已把 Speaker ${key} 記成「${name.trim()}」，存入 ${r.n_vectors_added} 段聲紋。`);
+    if (name.trim()) toast(`已把說話者 ${key} 記成「${name.trim()}」，存入 ${r.n_vectors_added} 段聲紋。`);
   } catch (err) { toast(err.message, true); }
 });
 
