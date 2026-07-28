@@ -118,8 +118,9 @@ section.transcript{flex:1;display:flex;flex-direction:column;min-width:0}
 /* ---- transcript ---- */
 .seg{display:flex;gap:10px;padding:5px 0;border-radius:8px}
 .seg:hover{background:var(--panel2)}
-.seg .ts{flex:none;width:52px;text-align:right;color:var(--faint);font-size:11px;padding-top:4px;
-  font-family:ui-monospace,Menlo,monospace}
+.seg .ts{flex:none;width:88px;text-align:right;color:var(--faint);font-size:11px;padding-top:4px;
+  font-family:ui-monospace,Menlo,monospace;line-height:1.35}
+.seg .ts .dur{display:block;color:var(--faint);opacity:.75}
 /* 遠端那一軌左邊加一條線，掃過去就知道哪些是對方講的 */
 .seg.remote{border-left:2px solid var(--accent);padding-left:6px;margin-left:-8px}
 .seg .who{flex:none;width:112px;padding-top:2px}
@@ -229,6 +230,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:12px}
     <div class="tbar">
       <b id="mtitle" class="grow">尚未開始</b>
       <span id="mmeta" class="tiny faint"></span>
+      <select id="fspk" class="sm" title="只顯示某位說話者的段落"></select>
       <button id="btnRe" class="sm" title="用目前門檻對這場重新分群，修正開頭標錯的段落">重新分群</button>
       <button id="btnTxt" class="sm">匯出逐字稿</button>
       <button id="btnJson" class="sm">匯出 JSON</button>
@@ -252,6 +254,7 @@ const api = async (m, u, b) => {
 };
 const esc = s => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const mmss = ms => `${String(Math.floor(ms/60000)).padStart(2,'0')}:${String(Math.floor(ms/1000)%60).padStart(2,'0')}`;
+const secs = ms => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
 
 let toastT;
 function toast(msg, bad) {
@@ -265,7 +268,7 @@ function toast(msg, bad) {
 }
 
 const S = {
-  running: false, liveId: null, viewId: null,
+  running: false, liveId: null, viewId: null, filterSpk: '',
   segs: new Map(), speakers: [], meetings: [], people: [], models: [],
   tracks: {}, tab: null, modelIds: [], installing: null, backlog: null,
 };
@@ -405,7 +408,8 @@ function addPending(ev) {
   if (pendingRows.has(pendKey(ev))) return;
   const el = document.createElement('div');
   el.className = 'seg pending' + (ev.track === 'system' ? ' remote' : '');
-  el.innerHTML = `<div class="ts">${mmss(ev.start_ms)}</div>`
+  el.innerHTML = `<div class="ts">${mmss(ev.start_ms)}–${mmss(ev.end_ms)}`
+    + `<span class="dur">${secs(ev.end_ms - ev.start_ms)}</span></div>`
     + `<div class="who"><span class="chip">轉寫中</span></div>`
     + `<div class="body"><div class="bar"></div><div class="bar b2"></div></div>`;
   $('#lines').querySelector('.empty')?.remove();
@@ -634,7 +638,8 @@ function renderSeg(seg) {
   if (seg.spk_score != null) bits.push(`聲紋 ${seg.spk_score}`);
   if (seg.edited) bits.push('已修');
   el.innerHTML =
-    `<div class="ts">${mmss(seg.start_ms)}</div>` +
+    `<div class="ts">${mmss(seg.start_ms)}–${mmss(seg.end_ms)}`
+      + `<span class="dur">${secs(seg.end_ms - seg.start_ms)}</span></div>` +
     `<div class="who"><span class="chip${named?' named':''}" data-key="${esc(seg.speaker_key||'')}"
         title="點一下命名 → 這一群的聲紋會存進人物庫">${esc(speakerLabel(seg.speaker_key, track))}</span></div>` +
     `<div class="body">` +
@@ -666,16 +671,40 @@ function resetTranscript(msg) {
   ensurePartial();
 }
 
+function renderSpeakerFilter() {
+  const sel = $('#fspk');
+  const counts = new Map();
+  for (const s of S.segs.values())
+    counts.set(s.speaker_key || '', (counts.get(s.speaker_key || '') || 0) + 1);
+  const keys = [...counts.keys()].sort();
+  const keep = S.filterSpk;
+  sel.innerHTML = '';
+  sel.add(new Option(`全部說話者 (${S.segs.size})`, ''));
+  for (const k of keys) {
+    const seg = [...S.segs.values()].find(x => (x.speaker_key || '') === k);
+    sel.add(new Option(`${speakerLabel(k, seg && seg.track)} (${counts.get(k)})`, k || '\u0000'));
+  }
+  sel.value = keep;
+  if (sel.value !== keep) { S.filterSpk = ''; sel.value = ''; }
+  sel.hidden = keys.length < 2;
+}
+
 function paintAll() {
   nodes.clear();
   $('#lines').innerHTML = '';
   ensurePartial();
-  const list = [...S.segs.values()].sort((a,b) => a.seq - b.seq);
+  renderSpeakerFilter();
+  let list = [...S.segs.values()].sort((a,b) => a.seq - b.seq);
+  if (S.filterSpk)
+    list = list.filter(s => (s.speaker_key || '\u0000') === S.filterSpk);
   if (!list.length) { $('#lines').insertBefore(
-      Object.assign(document.createElement('div'), {className:'empty', textContent:'還沒有內容。'}),
+      Object.assign(document.createElement('div'), {className:'empty',
+        textContent: S.filterSpk ? '這位說話者在這場沒有段落。' : '還沒有內容。'}),
       $('#partial')); }
   for (const s of list) renderSeg(s);
 }
+
+$('#fspk').onchange = () => { S.filterSpk = $('#fspk').value; paintAll(); };
 
 function atBottom() {
   const l = $('#lines');
@@ -772,6 +801,8 @@ function onEvent(ev) {
         S.speakers.push({speaker_key: ev.speaker_key, label: ev.speaker_label || '',
                          person_name: '', track: ev.track || 'mic'});
       S.segs.set(ev.id, ev);
+      renderSpeakerFilter();
+      if (S.filterSpk && (ev.speaker_key || '\u0000') !== S.filterSpk) break;
       const row = renderSeg(ev);
       typeIn(row.querySelector('.txt'), ev.text);
       $('#latency').textContent = `延遲 ${ev.latency_ms}ms / 語句 ${ev.audio_ms}ms`;
@@ -868,6 +899,7 @@ async function loadMeetings() {
 
 async function openMeeting(id, keepScroll) {
   const { meeting, speakers, segments } = await api('GET', `/api/meetings/${id}`);
+  if (S.viewId !== id) S.filterSpk = '';
   S.viewId = id;
   S.speakers = speakers;
   S.segs = new Map(segments.map(s => [s.id, s]));
