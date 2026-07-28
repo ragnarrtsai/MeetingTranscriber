@@ -15,6 +15,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from importlib.util import find_spec
+from pathlib import Path
 
 import numpy as np
 
@@ -38,6 +39,7 @@ class AsrResult:
     text: str
     lang: str = ""
     latency_ms: int = 0
+    dropped_loops: int = 0        # 被判定為重複迴圈而丟掉的段數
 
 
 @dataclass
@@ -159,6 +161,23 @@ def strip_repetition(text: str, max_repeats: int = 3) -> str:
     return text
 
 
+def drop_loop_segments(segments) -> tuple[str, int]:
+    """丟掉壓縮比超標的段，回傳 (文字, 丟掉幾段)。
+
+    whisper 只拿壓縮比決定要不要升溫重試，重試後還是超標仍然會回傳，所以自己擋。
+    """
+    kept, dropped = [], 0
+    for s in segments:
+        cr = s.get("compression_ratio") if isinstance(s, dict) else \
+            getattr(s, "compression_ratio", None)
+        text = (s.get("text") if isinstance(s, dict) else getattr(s, "text", "")) or ""
+        if cr is not None and cr > COMPRESSION_RATIO_THRESHOLD:
+            dropped += 1
+            continue
+        kept.append(text)
+    return "".join(kept).strip(), dropped
+
+
 class AsrBackend:
     def __init__(self, spec: ModelSpec):
         self.spec = spec
@@ -193,9 +212,11 @@ class MlxWhisper(AsrBackend):
             no_speech_threshold=NO_SPEECH_THRESHOLD,
             fp16=True, verbose=None,
         )
-        return AsrResult(text=strip_repetition((r.get("text") or "").strip()),
+        text, dropped = drop_loop_segments(r.get("segments") or [])
+        return AsrResult(text=strip_repetition(text),
                          lang=r.get("language", "") or "",
-                         latency_ms=int((time.perf_counter() - t0) * 1000))
+                         latency_ms=int((time.perf_counter() - t0) * 1000),
+                         dropped_loops=dropped)
 
 
 class FasterWhisper(AsrBackend):
@@ -223,9 +244,11 @@ class FasterWhisper(AsrBackend):
             no_speech_threshold=NO_SPEECH_THRESHOLD,
             beam_size=1, vad_filter=False,   # VAD 已經在上游做過了
         )
-        text = strip_repetition("".join(s.text for s in segs).strip())
-        return AsrResult(text=text, lang=getattr(info, "language", "") or "",
-                         latency_ms=int((time.perf_counter() - t0) * 1000))
+        text, dropped = drop_loop_segments(list(segs))
+        return AsrResult(text=strip_repetition(text),
+                         lang=getattr(info, "language", "") or "",
+                         latency_ms=int((time.perf_counter() - t0) * 1000),
+                         dropped_loops=dropped)
 
 
 class FunAsr(AsrBackend):

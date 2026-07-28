@@ -68,9 +68,21 @@ def _resample(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     return np.interp(dst_t, src_t, x).astype(np.float32)
 
 
-# 刻意不做自動增益：實測在只有底噪的音流上放大 24 倍，VAD 就會誤判成語音，
-# whisper 接著生成幻覺文字。要做的話必須用「調變深度」當閘門（語音在 100ms
-# 尺度的動態範圍 >20 dB、穩態噪音 <8 dB），單看振幅一定會誤觸發。
+# 刻意不做自動增益：放大底噪只會讓 VAD 誤判成語音，接著 whisper 生成幻覺文字。
+# 要判斷是不是語音就用下面的調變深度，不能看振幅。
+
+MOD_HOP = TARGET_SR // 10          # 100 ms，音節的尺度
+
+
+def modulation_depth_db(x: np.ndarray, hop: int = MOD_HOP) -> float:
+    """語音有音節起伏，噪音是平的。回傳音量的 p95 − p20，太短就回 inf。"""
+    if x.size < hop * 3:
+        return float("inf")
+    n = x.size // hop
+    frames = x[:n * hop].reshape(n, hop)
+    rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+    d = 20.0 * np.log10(np.maximum(rms, 1e-7))
+    return float(np.percentile(d, 95) - np.percentile(d, 20))
 
 
 class MicSource:

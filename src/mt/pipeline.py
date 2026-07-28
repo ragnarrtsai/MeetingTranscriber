@@ -33,7 +33,7 @@ import numpy as np
 import soundfile as sf
 
 from . import asr as asr_mod
-from .audio import MicSource, list_input_devices
+from .audio import MicSource, list_input_devices, modulation_depth_db
 from .spk import EMBED_DIM, EMBED_TAG, Embedder, OnlineClusterer
 from .store import Store
 from .vad import SR, Utterance, VadConfig, VadSegmenter
@@ -80,6 +80,11 @@ class SessionConfig:
     # 每軌音訊佇列的深度（單位：1024 樣本的塊，400 塊約 25.6 秒）。
     # 滿了就開始丟音訊，是「遺漏」的來源。開成可設定主要是為了測試能逼出過載。
     track_queue_blocks: int = 400
+    # 語音閘門：段落的調變深度（見 audio.modulation_depth_db）低於這個值就不送進
+    # ASR，用來擋非語音被 whisper 轉成幻覺文字。預設 0（關閉），也沒有 UI 入口 ——
+    # 幻覺的病因是麥克風收到壞資料，那個修掉之後就用不到它了。留著是因為每段的
+    # 實測值會記進 stats.recent_db，幻覺再出現時那些數字就是判斷門檻的依據。
+    speech_gate_db: float = 0.0
     vad: VadConfig = field(default_factory=VadConfig)
 
     @property
@@ -146,7 +151,9 @@ class Session:
         self._seq = 0
         self._t0 = 0.0            # 會議開始時刻，各軌的時間戳偏移都以它為基準
         self._lock = threading.Lock()
-        self.stats = {"dropped_audio": 0, "dropped_partials": 0, "asr_ms": 0, "utterances": 0}
+        self.stats: dict = {"dropped_audio": 0, "dropped_partials": 0, "asr_ms": 0,
+                            "utterances": 0, "rejected_nonspeech": 0, "empty_text": 0,
+                            "asr_loops": 0}
 
     # ---------- 軌道 ----------
 
@@ -462,6 +469,7 @@ class Session:
                 "enable_diarization": c.enable_diarization,
                 "recluster_every": c.recluster_every,
                 "spool_audio": c.spool_audio,
+                "speech_gate_db": c.speech_gate_db,
                 "vad": {"threshold": c.vad.threshold,
                         "min_silence_ms": c.vad.min_silence_ms,
                         "partial_every_ms": c.vad.partial_every_ms,
@@ -567,9 +575,14 @@ class Session:
         if not audio.size:
             return
 
+        if 0 < cfg.speech_gate_db > modulation_depth_db(audio):
+            self.stats["rejected_nonspeech"] += 1
+            return
+
         backend = asr_mod.get_backend(cfg.model_id)
         res = backend.transcribe(audio, prompt=cfg.prompt, language=cfg.language)
         self.stats["asr_ms"] = res.latency_ms
+        self.stats["asr_loops"] += res.dropped_loops
 
         if not u.is_final:
             if res.text:
@@ -579,6 +592,7 @@ class Session:
             return
 
         if not res.text.strip():
+            self.stats["empty_text"] += 1
             return
 
         # 其餘選到的模型逐一跑同一段音訊。序列化執行 —— GPU 本來就一次一個，
