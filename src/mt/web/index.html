@@ -292,6 +292,20 @@ function progress(msg) {
    第一個是主要模型：逐字稿正文與暫定稿都用它。其餘每一句都會再跑一次並排顯示。
    推論時間隨模型數線性增加，所以勾太多會讓即時性掉下來 —— 超過兩個就提醒。 */
 
+const preloading = new Set();
+async function preloadModel(id) {
+  if (preloading.has(id)) return;
+  preloading.add(id);
+  renderModels();
+  try {
+    await api('POST', `/api/models/${id}/preload`);
+    const r = await api('GET', '/api/models');
+    S.models = r.models;
+  } catch (e) {
+    toast(`${modelName(id)} 載入失敗：${e.message}`, true);
+  } finally { preloading.delete(id); renderModels(); }
+}
+
 function renderModels() {
   const el = $('#models');
   el.innerHTML = '';
@@ -300,21 +314,32 @@ function renderModels() {
     const on = i >= 0, primary = i === 0;
     const c = document.createElement('span');
     const busy = S.installing === m.id;
-    c.className = 'mchip' + (!m.installed ? ' off' : primary ? ' on primary' : on ? ' on' : '');
-    c.title = m.installed ? m.note
-      : `${m.note}\n\n未安裝。按 ⬇ 會執行：pip install ${(m.pip || []).join(' ')}`;
+    const loading = preloading.has(m.id);
+    // 權重沒抓的跟沒裝套件一樣不能直接勾
+    const needsDl = m.installed && !m.downloaded;
+    const ready = m.installed && m.downloaded;
+    c.className = 'mchip' + (!ready ? ' off' : primary ? ' on primary' : on ? ' on' : '');
+    c.title = !m.installed
+      ? `${m.note}\n\n未安裝。按 ⬇ 會執行：pip install ${(m.pip || []).join(' ')}`
+      : needsDl ? `${m.note}\n\n權重還沒下載。按 ⬇ 開始下載，載完才能勾選。`
+      : m.note;
     // 短名 ＋ 後端標籤。同一個 whisper 模型有 MLX 與 CPU 兩種跑法，
     // 只顯示模型名的話畫面上會出現兩個一模一樣的選項，分不出來。
     c.innerHTML = (primary ? '<span class="tag">主要</span>' : '')
+      + (loading ? '<span class="spin">◌</span>' : '')
       + `<span>${esc(m.short)}</span>`
       + (m.engine ? `<span class="eng">${esc(m.engine)}</span>` : '')
       + (on && !primary ? '<span class="star" title="設為主要">☆</span>' : '')
       + (!m.installed ? `<span class="dl" title="安裝 ${esc((m.pip||[]).join(' '))}">${
-          busy ? '<span class="spin">◌</span>' : '⬇'}</span>` : '');
+          busy ? '<span class="spin">◌</span>' : '⬇'}</span>`
+        : needsDl ? `<span class="dl" title="下載權重">${
+          loading ? '<span class="spin">◌</span>' : '⬇'}</span>` : '');
     if (!m.installed) {
       c.querySelector('.dl').onclick = e => { e.stopPropagation(); installModel(m); };
+    } else if (needsDl) {
+      c.querySelector('.dl').onclick = e => { e.stopPropagation(); preloadModel(m.id); };
     }
-    if (m.installed) {
+    if (ready) {
       c.onclick = e => {
         if (e.target.classList.contains('star')) {          // 設為主要
           S.modelIds = [m.id, ...S.modelIds.filter(x => x !== m.id)];
@@ -324,6 +349,7 @@ function renderModels() {
           S.modelIds = S.modelIds.filter(x => x !== m.id);
         } else {
           S.modelIds = [...S.modelIds, m.id];
+          preloadModel(m.id);
         }
         renderModels();
         pushCfg();
@@ -342,6 +368,12 @@ function renderModels() {
   } else {
     w.textContent = '';
   }
+}
+
+function modelName(id) {
+  const m = S.models.find(x => x.id === id);
+  if (!m) return id;
+  return (m.short || m.label || id) + (m.engine ? ` ${m.engine}` : '');
 }
 
 const TRACK_NAME = {mic: '現場', system: '遠端'};
@@ -628,6 +660,11 @@ function onEvent(ev) {
       break;
     case 'backlog':
       renderBacklog(ev);
+      break;
+    case 'preload':
+      if (ev.phase === 'start') progress(`正在載入 ${ev.label}…（第一次會下載權重，可能要幾分鐘）`);
+      else progress(null);
+      if (ev.phase === 'error') toast(`載入失敗：${ev.detail}`, true);
       break;
     case 'draining':
       // 已停止收音但還在轉寫。這時不能當成結束 —— 段落還會繼續進來。
@@ -951,6 +988,7 @@ $('#tabP').onclick = () => { $('#tabP').classList.add('on'); $('#tabH').classLis
   // 待機時直接開最近一場，不要讓人對著空面板
   if (!status.running && !S.viewId && S.meetings.length) await openMeeting(S.meetings[0].id);
   connect();
+  if (!status.running) S.modelIds.forEach(preloadModel);
 })().catch(e => toast('初始化失敗：' + e.message, true));
 </script>
 </body>

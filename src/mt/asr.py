@@ -68,6 +68,34 @@ class ModelSpec:
         return [p for p in self.requires if find_spec(p) is None]
 
     @property
+    def hf_repo(self) -> str:
+        """權重真正的 HuggingFace repo。
+
+        faster-whisper 的 repo 欄位是 'large-v3-turbo' 這種短名，
+        對到哪個 repo 由它自己的表決定，不能直接拿來找快取目錄。
+        """
+        if self.backend == "faster-whisper":
+            try:
+                from faster_whisper.utils import _MODELS
+                return _MODELS.get(self.repo, self.repo)
+            except Exception:
+                return self.repo
+        return self.repo
+
+    @property
+    def downloaded(self) -> bool:
+        """權重在不在本機。跟 installed 是兩件事：套件裝了，權重可能還沒抓。"""
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+        except Exception:
+            return False
+        snaps = Path(HF_HUB_CACHE) / f"models--{self.hf_repo.replace('/', '--')}" / "snapshots"
+        try:
+            return snaps.is_dir() and any(any(d.iterdir()) for d in snaps.iterdir())
+        except OSError:
+            return False
+
+    @property
     def pip_packages(self) -> tuple[str, ...]:
         return self.pip or self.requires
 
@@ -335,4 +363,5 @@ def catalog() -> list[dict]:
              "engine": m.engine, "backend": m.backend, "note": m.note,
              "installed": m.installed, "tags": list(m.tags),
              "missing": m.missing, "pip": list(m.pip_packages),
+             "downloaded": m.downloaded,
              "loaded": m.id in _CACHE} for m in MODELS]

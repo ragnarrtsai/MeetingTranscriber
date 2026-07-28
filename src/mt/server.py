@@ -83,6 +83,25 @@ def create_app(db_path: Path | str = DB_PATH) -> FastAPI:
     async def devices() -> dict:
         return {"devices": audio_devices()}
 
+    @app.post("/api/models/{model_id}/preload")
+    async def preload_model(model_id: str) -> dict:
+        """先把模型載進記憶體。第一次要下載權重，不能等到按下開始錄音才做。"""
+        spec = asr_mod.MODELS_BY_ID.get(model_id)
+        if spec is None:
+            raise HTTPException(404, f"未知的模型 id: {model_id}")
+        await broadcast({"type": "preload", "phase": "start", "model": model_id,
+                         "label": spec.label})
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, asr_mod.get_backend, model_id)
+        except Exception as e:
+            await broadcast({"type": "preload", "phase": "error", "model": model_id,
+                             "detail": str(e)})
+            raise HTTPException(400, str(e)) from e
+        await broadcast({"type": "preload", "phase": "done", "model": model_id,
+                         "label": spec.label})
+        return {"ok": True}
+
     install_lock = asyncio.Lock()
 
     @app.post("/api/models/{model_id}/install")

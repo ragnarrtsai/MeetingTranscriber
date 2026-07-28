@@ -14,8 +14,12 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-模型權重在第一次使用時自動下載（large-v3-turbo 約 1.5 GB，ECAPA 聲紋約 80 MB），
-之後就完全離線。
+用 3.13。ML 套件（torch、mlx-whisper）在更新的 Python 上常常還沒有 arm64 wheel，
+pip 會退回從原始碼編譯或直接失敗。`python3` 指到 3.14 以上的話改成
+`python3.13 -m venv .venv`。
+
+聲紋模型（ECAPA，約 80 MB）第一次錄音時自動下載。ASR 的權重要自己按 **⬇**
+（見下一節），之後就完全離線。
 
 ## 使用
 
@@ -54,9 +58,14 @@ python3 -m venv .venv
 `mlx-turbo` 是預設，在 Apple Silicon 上 RTF 約 0.08，即時很有餘裕。
 覺得不夠準就往 `large-v3` 試，覺得太慢就往 `medium` / `small` 退。
 
-標著「未安裝」的模型（SenseVoice、Paraformer）旁邊有 **⬇** 按鈕，
-按了會直接執行 `pip install`，裝進跑這支伺服器的那個 Python 環境（也就是 `.venv`），
-進度會即時顯示。裝完就能勾選，不用重開。
+chip 上有 **⬇** 代表還不能用，按了才會準備：缺 Python 套件的（SenseVoice、
+Paraformer）會執行 `pip install`，裝進跑這支伺服器的那個 Python 環境（也就是
+`.venv`）；套件有了但**權重還沒下載**的則開始抓權重（large-v3 約 2.9 GB、
+turbo 約 1.5 GB、small 約 459 MB）。兩種都會即時顯示進度，完成後 ⬇ 消失、
+可以勾選，不用重開。
+
+勾選之後模型就**立刻載進記憶體**，不是等按下開始錄音才載。第一次載入要暖機，
+放在錄音開始之後就會變成你在講話卻沒有逐字稿出來。
 
 `進階` 區的**提示詞**對混說影響很大。原因是 whisper 的 decoder 本質上是一個
 語言模型，一個字一個字續寫，同時參考聲音特徵和「已經寫出來的文字」。
