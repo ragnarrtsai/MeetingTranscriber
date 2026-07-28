@@ -97,7 +97,9 @@ class MicSource:
 
     def _callback(self, indata, frames, time_info, status):  # noqa: ARG002
         mono = indata[:, 0] if indata.ndim > 1 else indata
-        chunk = _resample(np.asarray(mono, dtype=np.float32), self._src_sr, TARGET_SR)
+        mono = np.nan_to_num(np.asarray(mono, dtype=np.float32), nan=0.0,
+                             posinf=0.0, neginf=0.0)
+        chunk = _resample(np.clip(mono, -1.0, 1.0), self._src_sr, TARGET_SR)
         if chunk.size:
             self.level = float(np.sqrt(np.mean(chunk ** 2)))
         try:
@@ -114,9 +116,9 @@ class MicSource:
     def start(self) -> None:
         if self._stream is not None:
             return
-        # 先試著直接開 16k，多數 macOS 裝置可以由 CoreAudio 代為轉換；
-        # 不行就用裝置原生取樣率收，自己降頻。
-        for sr in (TARGET_SR, None):
+        # 一定要用裝置原生取樣率、自己降頻。要求 CoreAudio 直接給 16k 時，
+        # 內建麥克風不會拋錯但會回傳量級 1e21 的垃圾數值，所以那條路只當備援。
+        for sr in (None, TARGET_SR):
             try:
                 self._src_sr = sr or int(
                     sd.query_devices(self.device if self.device is not None else
