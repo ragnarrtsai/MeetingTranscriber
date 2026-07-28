@@ -636,8 +636,8 @@ class Session:
 
         label = ""
         if assign and assign.person_id:
-            # 開集比對命中人物庫：直接把這一群認定成那個人
-            self.store.name_speaker(self.meeting_id, key, assign.person_name)
+            # 開集比對命中人物庫：把這一群連到那個人，但不要改他的名字
+            self.store.link_speaker(self.meeting_id, key, assign.person_id)
             label = assign.person_name
         elif key:
             for sp in self.store.speakers(self.meeting_id):

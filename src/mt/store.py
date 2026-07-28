@@ -475,6 +475,18 @@ class Store:
         return dict(self._db.execute("SELECT * FROM people WHERE id=?",
                                      (int(cur.lastrowid),)).fetchone())
 
+    def link_speaker(self, meeting_id: int, speaker_key: str, person_id: int,
+                     vecs=None, model: str = "", dim: int = 0) -> None:
+        """把一個說話者群連到某個人物，並同步該群的聲紋。"""
+        self._db.execute("INSERT OR IGNORE INTO speakers (meeting_id, speaker_key) VALUES (?,?)",
+                         (meeting_id, speaker_key))
+        self._db.execute("UPDATE speakers SET person_id=? WHERE meeting_id=? AND speaker_key=?",
+                         (person_id, meeting_id, speaker_key))
+        if vecs is not None and len(vecs):
+            self._sync_person_vectors(person_id, meeting_id, model, dim, vecs)
+        self._db.execute("UPDATE people SET updated_at=? WHERE id=?", (time.time(), person_id))
+        self._db.commit()
+
     def list_people(self) -> list[dict]:
         rows = self._db.execute(
             "SELECT p.*, (SELECT COUNT(*) FROM person_vectors v WHERE v.person_id=p.id) AS n_vectors,"
