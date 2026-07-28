@@ -134,6 +134,8 @@ class Session:
         self._worker: threading.Thread | None = None
         self._spool_dir: Path | None = None
         self.draining = False        # 已停止收音、但還在把積壓的語句轉完
+        self._starting = False       # 正在載入模型（可能要下載幾百 MB）
+        self._start_lock = threading.Lock()
         self._spool_files = 0        # 還沒轉完、還躺在磁碟上的語句數
         self._spool_bytes = 0
         self._spool_lock = threading.Lock()
@@ -282,6 +284,19 @@ class Session:
             raise RuntimeError("已經在錄音了")
         if self.draining:
             raise RuntimeError("上一場還有語句在轉寫，請等它跑完再開始")
+        # running 要等模型全部載完才會是 True，所以不能只看它。
+        # 第一次用某個模型可能要下載好幾百 MB，這段時間內重按「開始錄音」
+        # 會變成兩條執行緒同時載入同一個模型。
+        with self._start_lock:
+            if self._starting:
+                raise RuntimeError("正在載入模型，請稍候")
+            self._starting = True
+        try:
+            return self._start(title)
+        finally:
+            self._starting = False
+
+    def _start(self, title: str = "") -> int:
         # 先失敗在這裡，別等到錄了才爆。每個選到的模型都要能載入。
         backend = asr_mod.get_backend(self.cfg.model_id)
         for mid in self.cfg.compare_ids:

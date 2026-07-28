@@ -113,6 +113,57 @@ def cmd_compare(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mic(a: argparse.Namespace) -> int:
+    """即時顯示音量與 VAD 判斷。用來確認「為什麼錄不到東西」。
+
+    音量用 dBFS 而不是線性 RMS —— 人耳與麥克風的動態範圍是對數的，
+    線性刻度上正常說話只佔滿格的幾個百分點，看起來就像沒有訊號。
+    """
+    import sounddevice as sd
+
+    from .audio import MicSource
+    from .vad import FRAME, VadConfig, VadSegmenter
+
+    dev = a.device
+    print(f"  裝置: {sd.query_devices(dev)['name'] if dev is not None else '系統預設'}")
+    print(f"  講幾句話。VAD 門檻 {a.threshold}，超過就會標 ●speech\n")
+    print("  dBFS  音量表                          VAD   狀態")
+
+    seg = VadSegmenter(VadConfig(threshold=a.threshold))
+    mic = MicSource(device=dev)
+    mic.start()
+    carry = np.zeros(0, dtype=np.float32)
+    n_utt = 0
+    try:
+        while True:
+            chunk = mic.read(timeout=0.5)
+            if chunk is None or not chunk.size:
+                continue
+            buf = np.concatenate([carry, chunk])
+            nf = len(buf) // FRAME
+            carry = buf[nf * FRAME:].copy()
+            for i in range(nf):
+                frame = buf[i * FRAME:(i + 1) * FRAME]
+                p = seg._prob(frame)
+                rms = float(np.sqrt(np.mean(frame ** 2)))
+                db = 20 * np.log10(max(rms, 1e-6))
+                # -60 dB 當底、0 dB 當滿格
+                bars = int(max(0.0, min(1.0, (db + 60) / 60)) * 34)
+                mark = "●speech" if p >= a.threshold else "       "
+                for u in seg.push(frame):
+                    if u.is_final:
+                        n_utt += 1
+                print(f"\r  {db:6.1f} {'█' * bars:<34} {p:4.2f} {mark}  "
+                      f"語句 {n_utt}", end="", flush=True)
+    except KeyboardInterrupt:
+        print(f"\n\n  共切出 {n_utt} 句。")
+        print("  講話時 dBFS 應該到 -30 以上、VAD 機率接近 1.00。")
+        print("  如果講話時 dBFS 一直低於 -45，就是輸入音量太小或麥克風權限沒給。")
+    finally:
+        mic.stop()
+    return 0
+
+
 def cmd_serve(a: argparse.Namespace) -> int:
     import uvicorn
 
@@ -135,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("models", help="列出可用模型")
     s.set_defaults(fn=cmd_models)
+
+    s = sub.add_parser("mic", help="即時顯示音量與 VAD 判斷（診斷「錄不到東西」）")
+    s.add_argument("--device", type=int, default=None)
+    s.add_argument("--threshold", type=float, default=0.5)
+    s.set_defaults(fn=cmd_mic)
 
     s = sub.add_parser("file", help="轉寫單一音檔")
     s.add_argument("path")

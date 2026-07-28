@@ -68,6 +68,11 @@ def _resample(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     return np.interp(dst_t, src_t, x).astype(np.float32)
 
 
+# 刻意不做自動增益：實測在只有底噪的音流上放大 24 倍，VAD 就會誤判成語音，
+# whisper 接著生成幻覺文字。要做的話必須用「調變深度」當閘門（語音在 100ms
+# 尺度的動態範圍 >20 dB、穩態噪音 <8 dB），單看振幅一定會誤觸發。
+
+
 class MicSource:
     """背景執行緒收音，主流程用 read() 拉 16k mono float32。
 

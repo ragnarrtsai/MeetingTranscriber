@@ -11,6 +11,7 @@ whisper 系列的已知弱點是句內混說時會整句翻成單一語言（例
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from importlib.util import find_spec
@@ -47,6 +48,9 @@ class ModelSpec:
     repo: str
     short: str = ""                     # UI 上的短名（不含後端），空的就用 label
     engine: str = ""                    # 後端標籤，用來區分同一個模型的不同執行方式
+    # funasr 專用：從哪個 hub 下載。預設 ModelScope（"ms"）在台灣實測只有
+    # 70 kB/s，936MB 的 SenseVoice 要跑 3.5 小時；HuggingFace 連線快 20 倍以上。
+    hub: str = ""
     note: str = ""
     requires: tuple[str, ...] = ()      # 需要的 import 名稱
     pip: tuple[str, ...] = ()           # 對應的 pip 套件名（不一定同名）
@@ -104,16 +108,20 @@ MODELS: list[ModelSpec] = [
         backend="faster-whisper", repo="medium",
         short="medium", engine="CPU", note="純 CPU 對照組。",
         requires=("faster_whisper",), pip=("faster-whisper",), tags=("cpu",)),
+    # 這兩個走 HuggingFace 而非 funasr 預設的 ModelScope。
+    # 實測 ModelScope 在台灣只有 70 kB/s，936MB 的 SenseVoice 要下載 3.5 小時；
+    # HuggingFace 的連線時間快 20 倍以上。repo id 直接用 HF 上的，
+    # 不要用 funasr 的別名對照表 —— SenseVoice 在那張表裡沒有 HF 對應。
     ModelSpec(
         id="sensevoice", label="SenseVoice Small (FunASR)", backend="funasr",
-        repo="iic/SenseVoiceSmall",
+        repo="FunAudioLLM/SenseVoiceSmall", hub="hf",
         short="SenseVoice Small", engine="FunASR",
         note="非自回歸、對中文最強，官方支援中英日韓粵。不逐字續寫，結構上不會掉進"
-             "重複迴圈，但通常較不流暢。混說表現值得跟 whisper 直接對打。",
+             "重複迴圈，但通常較不流暢。混說表現值得跟 whisper 直接對打。約 936MB。",
         requires=("funasr",), pip=("funasr", "modelscope"), tags=("chinese",)),
     ModelSpec(
         id="paraformer-stream", label="Paraformer 串流 (FunASR)", backend="funasr",
-        repo="iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8404-online",
+        repo="funasr/paraformer-zh-streaming", hub="hf",
         short="Paraformer 串流", engine="FunASR",
         note="唯一的真串流模型，延遲最低，但以中文為主，英文詞很可能被吃掉。",
         requires=("funasr",), pip=("funasr", "modelscope"), tags=("chinese", "streaming")),
@@ -231,6 +239,8 @@ class FunAsr(AsrBackend):
         from funasr import AutoModel
 
         kw = {"model": self.spec.repo, "disable_update": True, "device": "cpu"}
+        if self.spec.hub:
+            kw["hub"] = self.spec.hub
         if not self._streaming:
             kw["vad_model"] = None
         self._m = AutoModel(**kw)
@@ -263,20 +273,38 @@ class FunAsr(AsrBackend):
 
 _BACKENDS = {"mlx": MlxWhisper, "faster-whisper": FasterWhisper, "funasr": FunAsr}
 _CACHE: dict[str, AsrBackend] = {}
+_CACHE_LOCK = threading.Lock()
+_LOAD_LOCKS: dict[str, threading.Lock] = {}
 
 
 def get_backend(model_id: str) -> AsrBackend:
+    """取得模型後端，第一次呼叫會下載權重並暖機。
+
+    每個模型一把載入鎖。少了它，兩條執行緒同時要同一個還沒下載的模型時
+    會各自開始下載 —— 症狀是「Still waiting to acquire lock on ...」
+    加上兩份平行的下載互搶頻寬。會發生在使用者重按「開始錄音」，
+    或設定變更與錄音啟動同時觸發載入的時候。
+    """
     spec = MODELS_BY_ID.get(model_id)
     if spec is None:
         raise ValueError(f"未知的模型 id: {model_id}")
     if not spec.installed:
         missing = [p for p in spec.requires if find_spec(p) is None]
         raise RuntimeError(f"{spec.label} 需要先安裝：pip install {' '.join(missing)}")
-    if model_id not in _CACHE:
+
+    hit = _CACHE.get(model_id)
+    if hit is not None:
+        return hit
+    with _CACHE_LOCK:
+        lock = _LOAD_LOCKS.setdefault(model_id, threading.Lock())
+    with lock:
+        hit = _CACHE.get(model_id)      # 等鎖的期間別人可能已經載好了
+        if hit is not None:
+            return hit
         b = _BACKENDS[spec.backend](spec)
         b.load()
         _CACHE[model_id] = b
-    return _CACHE[model_id]
+        return b
 
 
 def catalog() -> list[dict]:
