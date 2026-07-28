@@ -1,0 +1,959 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meeting-transcriber</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --line:#272c36;
+  --fg:#e6e8ee; --dim:#9aa3b2; --faint:#69717f;
+  --accent:#5aa9ff; --good:#4ec9a0; --warn:#e8b84b; --bad:#ff6b6b;
+  --radius:10px;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#f6f7f9; --panel:#fff; --panel2:#f0f2f5; --line:#e2e5ea;
+         --fg:#171a21; --dim:#5c6470; --faint:#8b93a1; }
+}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Helvetica Neue","PingFang TC","Noto Sans TC",sans-serif}
+button,select,input,textarea{font:inherit;color:inherit}
+button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:5px 11px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.4;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#06121f;font-weight:600}
+button.danger:hover{border-color:var(--bad);color:var(--bad)}
+select,input[type=text],input[type=number]{background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:5px 8px;max-width:100%}
+input[type=range]{accent-color:var(--accent);vertical-align:middle}
+a{color:var(--accent)}
+.row{display:flex;gap:8px;align-items:center}
+.wrap{flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.dim{color:var(--dim)}
+.faint{color:var(--faint)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tiny{font-size:11px}
+.sm{font-size:12px}
+
+/* ---- top bar ---- */
+header{border-bottom:1px solid var(--line);background:var(--panel);padding:9px 14px;
+  display:flex;flex-direction:column;gap:8px;flex:none}
+.brand{font-weight:700;letter-spacing:.2px}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-size:11px;color:var(--dim)}
+.pill.on{border-color:var(--good);color:var(--good)}
+.meter{width:88px;height:6px;border-radius:3px;background:var(--panel2);overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--good);transition:width .08s linear}
+.trk{display:flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;
+  padding:2px 8px 2px 9px}
+.trk.remote{border-color:var(--accent)}
+.trk .n{font-size:11px;color:var(--dim)}
+.trk .x{cursor:pointer;color:var(--faint);font-size:13px;line-height:1}
+.trk .x:hover{color:var(--bad)}
+
+/* 模型多選 */
+.mchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
+  border-radius:999px;padding:3px 10px;cursor:pointer;background:var(--panel2);font-size:12px;
+  user-select:none}
+.mchip:hover{border-color:var(--accent)}
+.mchip.on{border-color:var(--accent);background:rgba(90,169,255,.12)}
+.mchip.primary{border-color:var(--good);background:rgba(78,201,160,.14);font-weight:600}
+.mchip.off{opacity:.4;cursor:not-allowed}
+.mchip .tag{font-size:9px;border:1px solid var(--good);color:var(--good);border-radius:4px;
+  padding:0 3px;letter-spacing:.5px}
+.mchip .eng{font-size:9px;color:var(--faint);border:1px solid var(--line);border-radius:3px;
+  padding:0 3px;letter-spacing:.3px}
+.mchip .star{color:var(--faint);font-size:11px}
+.mchip.on .star:hover{color:var(--good)}
+.mchip.off{cursor:default}
+.mchip .dl{cursor:pointer;color:var(--accent);font-size:13px;line-height:1;opacity:1}
+.mchip .dl:hover{color:var(--fg)}
+.spin{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.field{display:flex;flex-direction:column;gap:2px}
+.field>label{font-size:11px;color:var(--faint)}
+label.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg);
+  border:1px solid var(--line);border-radius:8px;padding:5px 9px;cursor:pointer;
+  background:var(--panel2);white-space:nowrap}
+label.chk:hover{border-color:var(--accent)}
+label.chk input{accent-color:var(--accent);margin:0}
+#backlog.on{border-color:var(--warn);color:var(--warn)}
+#backlog.draining{border-color:var(--accent);color:var(--accent)}
+
+/* ---- layout ---- */
+main{flex:1;display:flex;min-height:0}
+aside{width:260px;flex:none;border-right:1px solid var(--line);background:var(--panel);
+  display:flex;flex-direction:column;min-height:0}
+.tabs{display:flex;border-bottom:1px solid var(--line);flex:none}
+.tabs button{flex:1;border:0;border-radius:0;background:transparent;padding:9px 4px;color:var(--dim);
+  border-bottom:2px solid transparent}
+.tabs button.on{color:var(--fg);border-bottom-color:var(--accent);background:var(--panel2)}
+.pane{flex:1;overflow-y:auto;padding:8px}
+.pane[hidden]{display:none}
+section.transcript{flex:1;display:flex;flex-direction:column;min-width:0}
+.tbar{flex:none;padding:7px 14px;border-bottom:1px solid var(--line);background:var(--panel);
+  display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#lines{flex:1;overflow-y:auto;padding:14px 16px 40px}
+
+/* ---- list items ---- */
+.item{border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;
+  cursor:pointer;background:var(--panel2)}
+.item:hover{border-color:var(--accent)}
+.item.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.item .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---- transcript ---- */
+.seg{display:flex;gap:10px;padding:5px 0;border-radius:8px}
+.seg:hover{background:var(--panel2)}
+.seg .ts{flex:none;width:52px;text-align:right;color:var(--faint);font-size:11px;padding-top:4px;
+  font-family:ui-monospace,Menlo,monospace}
+/* 遠端那一軌左邊加一條線，掃過去就知道哪些是對方講的 */
+.seg.remote{border-left:2px solid var(--accent);padding-left:6px;margin-left:-8px}
+.seg .who{flex:none;width:112px;padding-top:2px}
+.chip{display:inline-block;max-width:112px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:12px;cursor:pointer;
+  background:var(--bg)}
+.chip:hover{border-color:var(--accent)}
+.chip.named{border-color:var(--good);color:var(--good)}
+.seg .body{flex:1;min-width:0}
+.seg .txt{outline:none;border-radius:6px;padding:2px 4px;margin-left:-4px;white-space:pre-wrap;
+  word-break:break-word}
+.seg .txt:focus{background:var(--panel2);box-shadow:inset 0 0 0 1px var(--accent)}
+.seg.flash{animation:flash 1.1s ease-out}
+@keyframes flash{from{background:rgba(90,169,255,.22)}to{background:transparent}}
+.alt{margin-top:2px;padding:2px 6px;border-left:2px solid var(--warn);color:var(--dim);font-size:13px}
+.meta{font-size:10px;color:var(--faint);margin-top:1px}
+#partial{display:flex;gap:10px;padding:5px 0;opacity:.62;font-style:italic}
+#partial[hidden]{display:none}
+.empty{color:var(--faint);text-align:center;padding:48px 12px}
+.badge{font-size:10px;border:1px solid var(--line);border-radius:4px;padding:0 4px;color:var(--faint)}
+.toast{position:fixed;right:14px;bottom:14px;max-width:420px;background:var(--panel);
+  border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
+  padding:9px 12px;box-shadow:0 8px 28px rgba(0,0,0,.35);z-index:50;white-space:pre-wrap}
+.toast.bad{border-left-color:var(--bad)}
+.note{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+  font-size:12px;color:var(--dim);margin-bottom:8px}
+details summary{cursor:pointer;color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row wrap">
+    <span class="brand">meeting-transcriber</span>
+    <span id="state" class="pill">待機</span>
+    <div id="tracks" class="row"></div>
+    <span id="backlog" class="pill" hidden></span>
+    <span id="drops" class="tiny faint"></span>
+    <div class="grow"></div>
+    <span id="latency" class="tiny faint"></span>
+    <button id="btnTab" disabled title="擷取 Chrome 分頁的聲音（YouTube、Google Meet 等）。不需安裝任何東西。">＋ 分頁音訊</button>
+    <button id="btnStart" class="primary">開始錄音</button>
+    <button id="btnStop" disabled>停止</button>
+  </div>
+  <div class="row wrap">
+    <div class="field grow" style="min-width:300px">
+      <label>辨識模型（可多選；<b>主要</b>那個是逐字稿正文，其餘並排比對）<span id="mwarn" class="tiny"></span></label>
+      <div id="models" class="row wrap" style="gap:5px"></div>
+    </div>
+    <div class="field">
+      <label>麥克風</label>
+      <select id="device"></select>
+    </div>
+    <div class="field">
+      <label>語言</label>
+      <select id="lang">
+        <option value="">自動偵測（混說建議）</option>
+        <option value="zh">強制中文</option>
+        <option value="en">強制英文</option>
+      </select>
+    </div>
+    <div class="row" style="gap:14px;flex:none;flex-wrap:nowrap">
+      <div class="field">
+        <label>說話者分群門檻 <b id="thrV" class="mono">0.55</b></label>
+        <input id="thr" type="range" min="0.2" max="0.9" step="0.01" value="0.55"
+               title="分不開就調低，同一個人被拆成兩人就調高">
+      </div>
+      <div class="field">
+        <label>人物庫比對門檻 <b id="pthrV" class="mono">0.70</b></label>
+        <input id="pthr" type="range" min="0.4" max="0.95" step="0.01" value="0.70"
+               title="刻意比分群門檻高：把陌生人誤認成熟人，比留在 Speaker A 糟得多">
+      </div>
+    </div>
+  </div>
+  <details>
+    <summary>進階：混說提示詞、VAD 斷句</summary>
+    <div class="row wrap" style="margin-top:6px">
+      <div class="field grow" style="min-width:320px">
+        <label>提示詞（給模型看的文體範例，中英夾雜的關鍵）</label>
+        <input id="prompt" type="text">
+      </div>
+      <div class="field"><label>靜音斷句 (ms)</label><input id="sil" type="number" min="200" max="2000" step="50" value="600" style="width:90px"></div>
+      <div class="field"><label>暫定稿間隔 (ms)</label><input id="part" type="number" min="400" max="4000" step="100" value="1200" style="width:90px"></div>
+      <div class="field">
+        <label>音訊暫存</label>
+        <label class="chk" title="開啟（預設）：語句音訊先寫到磁碟，轉寫完立刻刪除。ASR 跟不上時逐字稿會晚出現但完整。&#10;關閉：音訊完全不落地，隱私較好，但過載時會丟音訊造成句子缺字。">
+          <input id="spool" type="checkbox" checked>
+          <span>錄音模式（不丟音訊）</span>
+        </label>
+      </div>
+      <div class="field"><label>&nbsp;</label><button id="btnCfg">套用</button></div>
+    </div>
+  </details>
+</header>
+
+<main>
+  <aside>
+    <div class="tabs">
+      <button id="tabH" class="on">歷史</button>
+      <button id="tabP">人物庫</button>
+    </div>
+    <div id="paneH" class="pane"></div>
+    <div id="paneP" class="pane" hidden></div>
+  </aside>
+
+  <section class="transcript">
+    <div class="tbar">
+      <b id="mtitle" class="grow">尚未開始</b>
+      <span id="mmeta" class="tiny faint"></span>
+      <button id="btnRe" class="sm" title="用目前門檻對這場重新分群，修正開頭標錯的段落">重新分群</button>
+      <button id="btnTxt" class="sm">匯出逐字稿</button>
+      <button id="btnJson" class="sm">匯出 JSON</button>
+      <button id="btnDel" class="sm danger">刪除</button>
+    </div>
+    <div id="lines">
+      <div class="empty">按「開始錄音」，或從左邊挑一場歷史會議。</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (m, u, b) => {
+  const r = await fetch(u, b === undefined ? {method:m} :
+    {method:m, headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
+  const txt = await r.text();
+  let data; try { data = txt ? JSON.parse(txt) : {}; } catch { data = {raw:txt}; }
+  if (!r.ok) throw new Error(data.detail || data.raw || r.statusText);
+  return data;
+};
+const esc = s => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const mmss = ms => `${String(Math.floor(ms/60000)).padStart(2,'0')}:${String(Math.floor(ms/1000)%60).padStart(2,'0')}`;
+
+let toastT;
+function toast(msg, bad) {
+  clearTimeout(toastT);
+  document.querySelector('.toast')?.remove();
+  const d = document.createElement('div');
+  d.className = 'toast' + (bad ? ' bad' : '');
+  d.textContent = msg;
+  document.body.appendChild(d);
+  toastT = setTimeout(() => d.remove(), bad ? 8000 : 3500);
+}
+
+const S = {
+  running: false, liveId: null, viewId: null,
+  segs: new Map(), speakers: [], meetings: [], people: [], models: [],
+  tracks: {}, tab: null, modelIds: [], installing: null, backlog: null,
+};
+
+/* 透過 UI 安裝模型缺少的套件。後端用 sys.executable -m pip，
+   也就是跑伺服器的那個 Python —— 從 .venv 啟動就裝進 .venv。 */
+async function installModel(m) {
+  if (S.installing) return toast('已經有一個安裝在進行中。', true);
+  if (!confirm(`要安裝 ${m.label} 需要的套件嗎？\n\n`
+      + `會執行：pip install ${(m.pip || []).join(' ')}\n`
+      + `裝進跑這支伺服器的那個 Python 環境（.venv）。\n\n`
+      + `下載量可能有幾百 MB，需要幾分鐘。`)) return;
+  S.installing = m.id;
+  renderModels();
+  progress(`正在安裝 ${m.label}…`);
+  try {
+    const r = await api('POST', `/api/models/${m.id}/install`);
+    S.models = r.models;
+    progress(null);
+    toast(r.already ? `${m.label} 本來就已安裝。`
+                    : `${m.label} 安裝完成，現在可以勾選了。`);
+  } catch (e) {
+    progress(null);
+    toast('安裝失敗：\n' + e.message, true);
+  } finally {
+    S.installing = null;
+    renderModels();
+  }
+}
+
+let progEl;
+function progress(msg) {
+  if (!msg) { progEl?.remove(); progEl = null; return; }
+  if (!progEl) {
+    progEl = document.createElement('div');
+    progEl.className = 'toast';
+    document.body.appendChild(progEl);
+  }
+  progEl.textContent = msg;
+}
+
+/* ---------------- 模型多選 ----------------
+   第一個是主要模型：逐字稿正文與暫定稿都用它。其餘每一句都會再跑一次並排顯示。
+   推論時間隨模型數線性增加，所以勾太多會讓即時性掉下來 —— 超過兩個就提醒。 */
+
+function renderModels() {
+  const el = $('#models');
+  el.innerHTML = '';
+  for (const m of S.models) {
+    const i = S.modelIds.indexOf(m.id);
+    const on = i >= 0, primary = i === 0;
+    const c = document.createElement('span');
+    const busy = S.installing === m.id;
+    c.className = 'mchip' + (!m.installed ? ' off' : primary ? ' on primary' : on ? ' on' : '');
+    c.title = m.installed ? m.note
+      : `${m.note}\n\n未安裝。按 ⬇ 會執行：pip install ${(m.pip || []).join(' ')}`;
+    // 短名 ＋ 後端標籤。同一個 whisper 模型有 MLX 與 CPU 兩種跑法，
+    // 只顯示模型名的話畫面上會出現兩個一模一樣的選項，分不出來。
+    c.innerHTML = (primary ? '<span class="tag">主要</span>' : '')
+      + `<span>${esc(m.short)}</span>`
+      + (m.engine ? `<span class="eng">${esc(m.engine)}</span>` : '')
+      + (on && !primary ? '<span class="star" title="設為主要">☆</span>' : '')
+      + (!m.installed ? `<span class="dl" title="安裝 ${esc((m.pip||[]).join(' '))}">${
+          busy ? '<span class="spin">◌</span>' : '⬇'}</span>` : '');
+    if (!m.installed) {
+      c.querySelector('.dl').onclick = e => { e.stopPropagation(); installModel(m); };
+    }
+    if (m.installed) {
+      c.onclick = e => {
+        if (e.target.classList.contains('star')) {          // 設為主要
+          S.modelIds = [m.id, ...S.modelIds.filter(x => x !== m.id)];
+        } else if (on) {
+          if (S.modelIds.length === 1)
+            return toast('至少要留一個模型。', true);
+          S.modelIds = S.modelIds.filter(x => x !== m.id);
+        } else {
+          S.modelIds = [...S.modelIds, m.id];
+        }
+        renderModels();
+        pushCfg();
+      };
+    }
+    el.appendChild(c);
+  }
+  const n = S.modelIds.length;
+  const w = $('#mwarn');
+  if (n > 2) {
+    w.textContent = `　⚠ 選了 ${n} 個，每句要跑 ${n} 次推論，即時性可能跟不上`;
+    w.style.color = 'var(--warn)';
+  } else if (n === 2) {
+    w.textContent = '　（每句跑 2 次）';
+    w.style.color = 'var(--faint)';
+  } else {
+    w.textContent = '';
+  }
+}
+
+const TRACK_NAME = {mic: '現場', system: '遠端'};
+
+/* ---------------- 分頁音訊擷取 ----------------
+   macOS 收系統音訊原本得裝 BlackHole 這類虛擬音訊裝置，而那需要管理者權限。
+   Chrome 的 getDisplayMedia 可以擷取分頁音訊，不必安裝、不必改系統設定、
+   不需要權限。限制是只抓得到 Chrome 分頁裡的聲音。
+
+   取樣率轉換交給 AudioContext（開成 16000 Hz，瀏覽器自己重採樣），
+   AudioWorklet 只負責把聲道混成單聲道並累積成整塊再送出。
+   Worklet 用 Blob URL 載入，維持單一 HTML 檔、不依賴任何外部資源。 */
+
+const WORKLET_SRC = `
+class Pump extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(2048); this.n = 0; }
+  process(inputs) {
+    const chans = inputs[0];
+    if (!chans || !chans.length) return true;
+    const len = chans[0].length;
+    for (let i = 0; i < len; i++) {
+      let v = 0;
+      for (let c = 0; c < chans.length; c++) v += chans[c][i];
+      this.buf[this.n++] = v / chans.length;   // 混成單聲道
+      if (this.n === this.buf.length) {
+        this.port.postMessage(this.buf.slice(0));
+        this.n = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pump', Pump);
+`;
+
+async function startTabAudio() {
+  if (S.tab) return;
+  if (!navigator.mediaDevices?.getDisplayMedia)
+    return toast('這個瀏覽器不支援分頁音訊擷取。請用 Chrome 或 Edge 開啟本頁。', true);
+  let stream;
+  try {
+    // Chrome 不接受只要 audio 的請求，必須連 video 一起要。
+    // 影像我們完全不用，但不能提前關掉 —— 關掉整個分享就結束了。
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: false},
+    });
+  } catch (e) {
+    if (e.name !== 'NotAllowedError') toast('無法擷取分頁音訊：' + e.message, true);
+    return;
+  }
+  if (!stream.getAudioTracks().length) {
+    stream.getTracks().forEach(t => t.stop());
+    return toast('這個分享沒有包含聲音。\n請在 Chrome 的選擇視窗裡挑「Chrome 分頁」，'
+      + '並勾選左下角的「同時分享分頁音訊」。', true);
+  }
+
+  const ws = new WebSocket(`ws://${location.host}/ws/audio?track=system`);
+  ws.binaryType = 'arraybuffer';
+  const ctx = new AudioContext({sampleRate: 16000});
+  S.tab = {stream, ws, ctx, node: null};
+
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'error') { toast('分頁音訊：' + m.detail, true); stopTabAudio(); }
+  };
+  ws.onclose = () => { if (S.tab) stopTabAudio(); };
+  ws.onopen = async () => {
+    try {
+      const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type: 'text/javascript'}));
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      const node = new AudioWorkletNode(ctx, 'pump');
+      node.port.onmessage = ev => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(ev.data.buffer);
+      };
+      ctx.createMediaStreamSource(stream).connect(node);
+      // Worklet 不接輸出也會被呼叫，但接到 destination 比較保險。
+      // 增益設 0，否則分頁的聲音會從喇叭再放一次造成回音。
+      const mute = ctx.createGain();
+      mute.gain.value = 0;
+      node.connect(mute).connect(ctx.destination);
+      S.tab.node = node;
+      toast('已開始收分頁音訊。逐字稿上會標成「遠端」。');
+    } catch (err) {
+      toast('分頁音訊啟動失敗：' + err.message, true);
+      stopTabAudio();
+    }
+  };
+
+  // 使用者按 Chrome 自己的「停止分享」時也要收乾淨
+  stream.getVideoTracks()[0]?.addEventListener('ended', stopTabAudio);
+  stream.getAudioTracks()[0]?.addEventListener('ended', stopTabAudio);
+  $('#btnTab').textContent = '停止分頁音訊';
+}
+
+function stopTabAudio() {
+  const t = S.tab;
+  S.tab = null;
+  if (!t) return;
+  try { t.node?.disconnect(); } catch {}
+  try { t.ctx.close(); } catch {}
+  try { t.stream.getTracks().forEach(x => x.stop()); } catch {}
+  try { t.ws.close(); } catch {}
+  $('#btnTab').textContent = '＋ 分頁音訊';
+}
+
+/* 待解析的音檔數與佔用容量。ASR 落後時這個數字會往上跑 ——
+   錄音模式下代表「還沒轉完」而不是「已經丟掉」，看得到才知道要不要減模型。 */
+function fmtBytes(b) {
+  if (!b) return '0';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return `${b < 10 && i > 0 ? b.toFixed(1) : Math.round(b)} ${u[i]}`;
+}
+
+function renderBacklog(b) {
+  if (b) S.backlog = b;
+  const x = S.backlog || {};
+  const el = $('#backlog');
+  const n = x.files || 0, pending = x.pending || 0;
+  if (!n && !pending && !x.draining) { el.hidden = true; return; }
+  el.hidden = false;
+  el.className = 'pill' + (x.draining ? ' draining' : n > 3 ? ' on' : '');
+  el.textContent = x.draining
+    ? `收尾轉寫中… 還有 ${pending} 句`
+    : `待解析 ${n} 支音檔 · ${fmtBytes(x.bytes)}`;
+  el.title = x.draining
+    ? '已停止收音，正在把積壓的語句轉完。全部轉完才會結束這場會議。'
+    : `ASR 落後 ${pending} 句。音訊暫存在磁碟上，不會遺失，但逐字稿會晚出現。\n`
+      + '數字一直往上就是模型太多或太大了。';
+}
+
+function renderTracks() {
+  const el = $('#tracks');
+  el.innerHTML = '';
+  for (const [name, t] of Object.entries(S.tracks)) {
+    const d = document.createElement('div');
+    d.className = 'trk' + (name === 'system' ? ' remote' : '');
+    d.innerHTML = `<span class="n">${esc(t.label || TRACK_NAME[name] || name)}</span>`
+      + `<span class="meter"><i style="width:${Math.min(100, (t.level||0)*320)}%"></i></span>`
+      + (name === 'system' ? '<span class="x" title="停止">✕</span>' : '');
+    d.querySelector('.x')?.addEventListener('click', stopTabAudio);
+    el.appendChild(d);
+  }
+}
+
+/* ---------------- 逐字稿渲染 ---------------- */
+// 已輸出的段落必須可以被追溯修正（背景重新分群會改掉前面的說話者），
+// 所以這裡用 id -> DOM 的索引就地更新，而不是 append-only 往下堆。
+const nodes = new Map();
+
+function speakerLabel(key, track) {
+  const sp = S.speakers.find(s => s.speaker_key === key);
+  const name = sp && (sp.label || sp.person_name);
+  if (name) return name;
+  if (!key) return '未分群';
+  // 系統音訊那一軌的代號帶 R 前綴（RA / RB），顯示時拿掉並標成「遠端」
+  const t = track || (sp && sp.track) || 'mic';
+  return t === 'system' ? `遠端 ${key.replace(/^R/, '')}` : `Speaker ${key}`;
+}
+
+function renderSeg(seg) {
+  let el = nodes.get(seg.id);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'seg';
+    el.dataset.id = seg.id;
+    nodes.set(seg.id, el);
+    $('#lines').insertBefore(el, $('#partial'));
+  }
+  const sp = S.speakers.find(s => s.speaker_key === seg.speaker_key);
+  const named = !!(sp && (sp.label || sp.person_name));
+  const track = seg.track || 'mic';
+  el.classList.toggle('remote', track === 'system');
+  const bits = [];
+  if (track !== 'mic') bits.push(TRACK_NAME[track] || track);
+  // 即時事件用 model，資料庫讀回來的欄位是 asr_model
+  const model = seg.model || seg.asr_model;
+  if (model) bits.push(esc(model));
+  if (seg.lang) bits.push(esc(seg.lang));
+  if (seg.latency_ms) bits.push(`${seg.latency_ms}ms`);
+  if (seg.spk_score != null) bits.push(`聲紋 ${seg.spk_score}`);
+  if (seg.edited) bits.push('已修');
+  el.innerHTML =
+    `<div class="ts">${mmss(seg.start_ms)}</div>` +
+    `<div class="who"><span class="chip${named?' named':''}" data-key="${esc(seg.speaker_key||'')}"
+        title="點一下命名 → 這一群的聲紋會存進人物庫">${esc(speakerLabel(seg.speaker_key, track))}</span></div>` +
+    `<div class="body">` +
+      `<div class="txt" contenteditable="plaintext-only" spellcheck="false">${esc(seg.text)}</div>` +
+      (seg.alts || []).map(a =>
+        `<div class="alt" title="${esc(a.model)} 對同一句話的輸出">`
+        + `<b>${esc(a.model)}</b>：${esc(a.text) || '<i>（空）</i>'}`
+        + (a.latency_ms ? ` <span class="tiny faint">${a.latency_ms}ms</span>` : '')
+        + `</div>`).join('') +
+      (bits.length ? `<div class="meta">${bits.join(' · ')}</div>` : '') +
+    `</div>`;
+  return el;
+}
+
+function ensurePartial() {
+  if (!$('#partial')) {
+    const p = document.createElement('div');
+    p.id = 'partial';
+    p.hidden = true;
+    p.innerHTML = `<div class="ts">…</div><div class="who faint tiny" style="padding-top:4px">辨識中</div><div class="body" id="ptxt"></div>`;
+    $('#lines').appendChild(p);
+  }
+}
+
+function resetTranscript(msg) {
+  nodes.clear();
+  S.segs.clear();
+  $('#lines').innerHTML = msg ? `<div class="empty">${esc(msg)}</div>` : '';
+  ensurePartial();
+}
+
+function paintAll() {
+  nodes.clear();
+  $('#lines').innerHTML = '';
+  ensurePartial();
+  const list = [...S.segs.values()].sort((a,b) => a.seq - b.seq);
+  if (!list.length) { $('#lines').insertBefore(
+      Object.assign(document.createElement('div'), {className:'empty', textContent:'還沒有內容。'}),
+      $('#partial')); }
+  for (const s of list) renderSeg(s);
+}
+
+function atBottom() {
+  const l = $('#lines');
+  return l.scrollHeight - l.scrollTop - l.clientHeight < 90;
+}
+function scrollDown() { const l = $('#lines'); l.scrollTop = l.scrollHeight; }
+
+/* ---------------- 事件（WebSocket） ---------------- */
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => onEvent(JSON.parse(e.data));
+  ws.onclose = () => { setState(false, '連線中斷'); setTimeout(connect, 1500); };
+  ws.onerror = () => {};
+}
+
+function onEvent(ev) {
+  switch (ev.type) {
+    case 'hello':
+      if (ev.running) {
+        S.running = true; S.liveId = ev.meeting_id; setState(true);
+        api('GET', '/api/tracks').then(r => {
+          S.tracks = r.tracks; renderTracks(); renderBacklog(r.backlog);
+        }).catch(() => {});
+      }
+      break;
+    case 'started':
+      S.running = true; S.liveId = S.viewId = ev.meeting_id;
+      S.speakers = []; S.tracks = ev.tracks || {}; resetTranscript();
+      setState(true);
+      renderTracks();
+      loadMeetings();
+      $('#mtitle').textContent = '錄音中…';
+      break;
+    case 'stopped':
+      S.running = false; setState(false);
+      stopTabAudio();
+      S.tracks = {}; S.backlog = null; renderTracks(); renderBacklog();
+      loadMeetings();
+      if (S.viewId) openMeeting(S.viewId, true);
+      break;
+    case 'track':
+      S.tracks = ev.tracks || {};
+      renderTracks();
+      break;
+    case 'backlog':
+      renderBacklog(ev);
+      break;
+    case 'draining':
+      // 已停止收音但還在轉寫。這時不能當成結束 —— 段落還會繼續進來。
+      renderBacklog(ev);
+      setState(false, `收尾中 (${ev.pending})`);
+      toast(`已停止收音。還有 ${ev.pending} 句在轉寫，轉完才會結束這場會議。`);
+      break;
+    case 'level': {
+      const name = ev.track || 'mic';
+      if (!S.tracks[name]) S.tracks[name] = {label: TRACK_NAME[name] || name};
+      S.tracks[name].level = ev.rms;
+      S.tracks[name].dropped = ev.dropped;
+      renderTracks();
+      const drops = Object.values(S.tracks).reduce((a, t) => a + (t.dropped || 0), 0);
+      $('#drops').textContent = drops ? `丟棄 ${drops} 塊音訊` : '';
+      break;
+    }
+    case 'partial': {
+      if (S.viewId !== S.liveId) break;
+      ensurePartial();
+      const p = $('#partial');
+      p.hidden = false;
+      p.querySelector('.who').textContent =
+        (ev.track && ev.track !== 'mic' ? (TRACK_NAME[ev.track] || ev.track) + ' ' : '') + '辨識中';
+      $('#ptxt').textContent = ev.text;
+      if (atBottom()) scrollDown();
+      break;
+    }
+    case 'segment': {
+      if (S.viewId !== S.liveId) { loadMeetings(); break; }
+      const stick = atBottom();
+      $('#partial') && ($('#partial').hidden = true);
+      $('#lines').querySelector('.empty')?.remove();
+      if (ev.speaker_key && !S.speakers.some(s => s.speaker_key === ev.speaker_key))
+        S.speakers.push({speaker_key: ev.speaker_key, label: ev.speaker_label || '',
+                         person_name: '', track: ev.track || 'mic'});
+      S.segs.set(ev.id, ev);
+      renderSeg(ev);
+      $('#latency').textContent = `延遲 ${ev.latency_ms}ms / 語句 ${ev.audio_ms}ms`;
+      if (stick) scrollDown();
+      break;
+    }
+    case 'relabel': {
+      // 追溯修正：全域重新分群改掉了前面段落的說話者
+      if (ev.speakers) S.speakers = ev.speakers;
+      let n = 0;
+      for (const c of ev.changes) {
+        const s = S.segs.get(c.id);
+        if (!s) continue;
+        s.speaker_key = c.speaker_key;
+        const el = renderSeg(s);
+        el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+        n++;
+      }
+      for (const s of S.segs.values()) renderSeg(s);
+      if (n) toast(`重新分群：修正了 ${n} 段的說話者`);
+      break;
+    }
+    case 'config':
+      applyConfigToUI(ev.config);
+      break;
+    case 'install':
+      // 安裝進度是後端 pip 的即時輸出，讓使用者看得到在動而不是以為卡住
+      if (ev.phase === 'log') progress(`安裝 ${ev.model}…\n${ev.line}`);
+      else if (ev.phase === 'done' && ev.models) S.models = ev.models;
+      break;
+    case 'error':
+      toast(`${ev.where} 發生錯誤：\n` + String(ev.detail).split('\n').slice(-4).join('\n'), true);
+      break;
+  }
+}
+
+function setState(running, label) {
+  S.running = running;
+  const st = $('#state');
+  st.textContent = label || (running ? '錄音中' : '待機');
+  st.classList.toggle('on', running);
+  $('#btnStart').disabled = running;
+  $('#btnStop').disabled = !running;
+  // 分頁音訊必須在錄音開始後才能加 —— 它是加到目前這場會議上的一條軌
+  $('#btnTab').disabled = !running;
+  $('#btnTab').title = running
+    ? '擷取 Chrome 分頁的聲音（YouTube、Google Meet 等）。不需安裝任何東西。'
+    : '先開始錄音，才能加收分頁音訊。';
+  if (!running) { $('#partial') && ($('#partial').hidden = true); }
+}
+
+/* ---------------- 側欄：歷史 ---------------- */
+async function loadMeetings() {
+  const { meetings } = await api('GET', '/api/meetings');
+  S.meetings = meetings;
+  $('#paneH').innerHTML = meetings.length ? '' :
+    `<div class="note">還沒有會議記錄。錄一場就會出現在這裡，包含逐字稿與聲紋。</div>`;
+  for (const m of meetings) {
+    const d = document.createElement('div');
+    d.className = 'item' + (m.id === S.viewId ? ' on' : '');
+    const live = S.running && m.id === S.liveId;
+    d.innerHTML = `<div class="t">${esc(m.title)}${live ? ' <span class="badge" style="color:var(--good);border-color:var(--good)">錄音中</span>' : ''}</div>`
+      + `<div class="tiny faint">${m.n_segments} 段 · ${m.n_speakers} 位說話者</div>`
+      + `<div class="tiny faint mono">${esc(m.asr_model)}</div>`;
+    d.onclick = () => openMeeting(m.id);
+    $('#paneH').appendChild(d);
+  }
+}
+
+async function openMeeting(id, keepScroll) {
+  const { meeting, speakers, segments } = await api('GET', `/api/meetings/${id}`);
+  S.viewId = id;
+  S.speakers = speakers;
+  S.segs = new Map(segments.map(s => [s.id, s]));
+  paintAll();
+  const started = new Date(meeting.started_at * 1000).toLocaleString('zh-TW');
+  $('#mtitle').textContent = meeting.title;
+  $('#mmeta').textContent = `${started} · ASR ${meeting.asr_model} · 聲紋 ${meeting.embed_model}`;
+  loadMeetings();
+  if (!keepScroll) $('#lines').scrollTop = 0;
+}
+
+/* ---------------- 側欄：人物庫 ---------------- */
+async function loadPeople() {
+  const { people, embed_model } = await api('GET', '/api/people');
+  S.people = people;
+  const p = $('#paneP');
+  p.innerHTML = `<div class="note">把逐字稿裡的「Speaker A」點開改成真名，那一群的聲紋就會存進這裡，
+    下一場會議同一個人第一句話就能被認出來。<br><br>目前嵌入模型：<span class="mono">${esc(embed_model)}</span>
+    。換模型的話舊聲紋無法轉換，必須重建。</div>
+    <div class="row" style="margin-bottom:8px">
+      <button id="pExp" class="sm">全部匯出</button>
+      <button id="pImp" class="sm">匯入</button>
+    </div>`;
+  for (const person of people) {
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.style.cursor = 'default';
+    d.innerHTML = `<div class="row"><b class="grow">${esc(person.name)}</b>
+      <button class="sm" data-a="ren">改名</button>
+      <button class="sm" data-a="exp">匯出</button>
+      <button class="sm danger" data-a="del">刪除</button></div>
+      <div class="tiny faint">${person.n_vectors} 段聲紋 · 來自 ${person.n_meetings} 場會議</div>
+      <div class="tiny faint mono">${esc(person.embed_model)}</div>`;
+    d.querySelector('[data-a=ren]').onclick = async () => {
+      const name = prompt('改成什麼名字？', person.name);
+      if (!name) return;
+      await api('PATCH', `/api/people/${person.id}`, {name});
+      await loadPeople(); if (S.viewId) openMeeting(S.viewId, true);
+    };
+    d.querySelector('[data-a=exp]').onclick = () =>
+      location.href = `/api/people/export?ids=${person.id}`;
+    d.querySelector('[data-a=del]').onclick = async () => {
+      if (!confirm(`刪除「${person.name}」的聲紋？逐字稿不會被刪，但這個人要重新建立。`)) return;
+      await api('DELETE', `/api/people/${person.id}`);
+      await loadPeople(); if (S.viewId) openMeeting(S.viewId, true);
+    };
+    p.appendChild(d);
+  }
+  $('#pExp').onclick = () => location.href = '/api/people/export';
+  $('#pImp').onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json,application/json';
+    inp.onchange = async () => {
+      const f = inp.files[0]; if (!f) return;
+      try {
+        const r = await api('POST', '/api/people/import',
+          {payload: JSON.parse(await f.text()), merge: true});
+        toast(`匯入 ${r.added.length} 人${r.skipped.length ? `，跳過 ${r.skipped.length} 人：`
+          + r.skipped.map(s => `${s.name}（${s.reason}）`).join('、') : ''}`);
+        loadPeople();
+      } catch (e) { toast('匯入失敗：' + e.message, true); }
+    };
+    inp.click();
+  };
+}
+
+/* ---------------- 逐字稿互動 ---------------- */
+$('#lines').addEventListener('click', async e => {
+  const chip = e.target.closest('.chip');
+  if (!chip || !S.viewId) return;
+  const key = chip.dataset.key;
+  if (!key) return toast('這一段沒有聲紋（語句太短），無法命名。', true);
+  const sp = S.speakers.find(s => s.speaker_key === key);
+  const cur = (sp && (sp.label || sp.person_name)) || '';
+  const name = prompt(
+    `Speaker ${key} 是誰？\n\n填入名字會把這一群的聲紋存進人物庫，之後的會議會自動認出來。\n留空則取消命名。`,
+    cur);
+  if (name === null) return;
+  try {
+    const r = await api('POST', `/api/meetings/${S.viewId}/speakers/${key}/name`, {name});
+    S.speakers = r.speakers;
+    for (const s of S.segs.values()) renderSeg(s);
+    loadPeople();
+    if (name.trim()) toast(`已把 Speaker ${key} 記成「${name.trim()}」，存入 ${r.n_vectors_added} 段聲紋。`);
+  } catch (err) { toast(err.message, true); }
+});
+
+$('#lines').addEventListener('focusout', async e => {
+  const txt = e.target.closest('.txt');
+  if (!txt) return;
+  const id = Number(txt.closest('.seg').dataset.id);
+  const seg = S.segs.get(id);
+  const val = txt.textContent.trim();
+  if (!seg || val === seg.text) return;
+  try {
+    await api('PATCH', `/api/segments/${id}`, {text: val});
+    seg.text = val; seg.edited = true; renderSeg(seg);
+  } catch (err) { toast('存檔失敗：' + err.message, true); }
+});
+
+/* ---------------- 控制列 ---------------- */
+function cfgFromUI() {
+  return {
+    model_ids: S.modelIds,
+    spool_audio: $('#spool').checked,
+    prompt: $('#prompt').value,
+    language: $('#lang').value || null,
+    device_index: $('#device').value === '' ? null : Number($('#device').value),
+    cluster_threshold: Number($('#thr').value),
+    person_threshold: Number($('#pthr').value),
+    vad: {min_silence_ms: Number($('#sil').value), partial_every_ms: Number($('#part').value)},
+  };
+}
+function applyConfigToUI(c) {
+  if (!c) return;
+  // 設定裡的模型可能沒安裝（例如換過機器）。把裝不到的濾掉，
+  // 全都濾掉就退回第一個可用的，不要讓畫面停在一個選不動的狀態。
+  const usable = S.models.filter(m => m.installed).map(m => m.id);
+  let ids = (c.model_ids || [c.model_id]).filter(Boolean);
+  const missing = ids.filter(id => !usable.includes(id));
+  ids = ids.filter(id => usable.includes(id));
+  if (missing.length && usable.length) {
+    if (!ids.length) ids = [usable[0]];
+    toast(`設定裡的模型未安裝：${missing.join('、')}，已忽略。`, true);
+    api('POST', '/api/config', {model_ids: ids}).catch(() => {});
+  }
+  S.modelIds = ids.length ? ids : usable.slice(0, 1);
+  renderModels();
+  if (c.spool_audio !== undefined) $('#spool').checked = !!c.spool_audio;
+  $('#prompt').value = c.prompt || '';
+  $('#lang').value = c.language || '';
+  $('#thr').value = c.cluster_threshold; $('#thrV').textContent = c.cluster_threshold.toFixed(2);
+  $('#pthr').value = c.person_threshold; $('#pthrV').textContent = c.person_threshold.toFixed(2);
+  if (c.vad) { $('#sil').value = c.vad.min_silence_ms; $('#part').value = c.vad.partial_every_ms; }
+  if (c.device_index != null) $('#device').value = String(c.device_index);
+}
+
+$('#thr').oninput = () => $('#thrV').textContent = Number($('#thr').value).toFixed(2);
+$('#pthr').oninput = () => $('#pthrV').textContent = Number($('#pthr').value).toFixed(2);
+
+const pushCfg = async () => {
+  try { await api('POST', '/api/config', cfgFromUI()); }
+  catch (e) { toast(e.message, true); }
+};
+for (const id of ['#lang', '#device', '#thr', '#pthr', '#spool'])
+  $(id).addEventListener('change', pushCfg);
+$('#btnCfg').onclick = () => pushCfg().then(() => toast('設定已套用'));
+
+$('#btnStart').onclick = async () => {
+  $('#btnStart').disabled = true;
+  $('#state').textContent = '載入模型…';
+  try {
+    await api('POST', '/api/start', {title: '', ...cfgFromUI()});
+  } catch (e) {
+    toast('無法開始：' + e.message, true);
+    setState(false);
+  }
+};
+$('#btnStop').onclick = async () => {
+  $('#btnStop').disabled = true;
+  stopTabAudio();
+  try { await api('POST', '/api/stop'); } catch (e) { toast(e.message, true); }
+};
+$('#btnTab').onclick = () => S.tab ? stopTabAudio() : startTabAudio();
+
+$('#btnRe').onclick = async () => {
+  if (!S.viewId) return;
+  try {
+    const r = await api('POST', `/api/meetings/${S.viewId}/recluster`,
+      {threshold: Number($('#thr').value)});
+    S.speakers = r.speakers;
+    S.segs = new Map(r.segments.map(s => [s.id, s]));
+    paintAll();
+    toast(`重新分群完成：修正 ${r.changed} 段`);
+  } catch (e) { toast(e.message, true); }
+};
+$('#btnTxt').onclick = () => S.viewId && (location.href = `/api/meetings/${S.viewId}/export?fmt=txt`);
+$('#btnJson').onclick = () => S.viewId && (location.href = `/api/meetings/${S.viewId}/export?fmt=json`);
+$('#btnDel').onclick = async () => {
+  if (!S.viewId) return;
+  if (!confirm('刪除這場會議？逐字稿與其中的聲紋都會消失（已存進人物庫的不受影響）。')) return;
+  try {
+    await api('DELETE', `/api/meetings/${S.viewId}`);
+    S.viewId = null; resetTranscript('已刪除。');
+    $('#mtitle').textContent = '尚未開始'; $('#mmeta').textContent = '';
+    loadMeetings();
+  } catch (e) { toast(e.message, true); }
+};
+
+$('#tabH').onclick = () => { $('#tabH').classList.add('on'); $('#tabP').classList.remove('on');
+  $('#paneH').hidden = false; $('#paneP').hidden = true; };
+$('#tabP').onclick = () => { $('#tabP').classList.add('on'); $('#tabH').classList.remove('on');
+  $('#paneP').hidden = false; $('#paneH').hidden = true; loadPeople(); };
+
+/* ---------------- 啟動 ---------------- */
+(async function init() {
+  ensurePartial();
+  const [{models, default_prompt}, {devices}, status] = await Promise.all([
+    api('GET', '/api/models'), api('GET', '/api/devices'), api('GET', '/api/status')]);
+  S.models = models;
+  $('#device').add(new Option('系統預設', '', true, true));
+  let hasLoopback = false;
+  for (const d of devices) {
+    // 虛擬裝置（BlackHole / Loopback 等）標出來：選它就是收「系統在播什麼」，
+    // 也就是 YouTube、Google Meet 裡對方的聲音。
+    const tag = d.is_loopback ? '  ⟲ 系統音訊' : (d.is_default ? '（預設）' : '');
+    hasLoopback = hasLoopback || d.is_loopback;
+    $('#device').add(new Option(d.name + tag, String(d.index)));
+  }
+  if (!hasLoopback) {
+    const hint = new Option('── 想收系統音訊？裝 BlackHole 後會出現在這裡 ──', '');
+    hint.disabled = true;
+    $('#device').add(hint);
+  }
+  $('#prompt').value = default_prompt;
+  applyConfigToUI(status.config);
+  renderBacklog(status.backlog);
+  setState(status.running);
+  if (status.meeting_id) { S.liveId = status.meeting_id; openMeeting(status.meeting_id); }
+  await loadMeetings();
+  // 待機時直接開最近一場，不要讓人對著空面板
+  if (!status.running && !S.viewId && S.meetings.length) await openMeeting(S.meetings[0].id);
+  connect();
+})().catch(e => toast('初始化失敗：' + e.message, true));
+</script>
+</body>
+</html>

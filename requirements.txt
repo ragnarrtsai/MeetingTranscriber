@@ -1,0 +1,20 @@
+# 核心
+numpy
+sounddevice          # wheel 自帶 PortAudio，macOS 不需另外 brew install
+soundfile
+silero-vad           # VAD 語句切分
+fastapi
+uvicorn[standard]
+
+# 說話者聲紋
+torch
+torchaudio
+speechbrain          # ECAPA-TDNN，192 維
+
+# ASR 後端（至少要有一個）
+mlx-whisper          # Apple Silicon GPU，macOS 首選
+faster-whisper       # CPU，跨平台對照組
+
+# 選用：對中文更強，需另外安裝
+# funasr
+# modelscope
