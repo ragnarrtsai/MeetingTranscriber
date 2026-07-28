@@ -375,7 +375,7 @@ class Store:
 
     def speakers(self, meeting_id: int) -> list[dict]:
         rows = self._db.execute(
-            "SELECT k.*, p.name AS person_name,"
+            "SELECT k.*, p.name AS person_name, p.uid AS person_uid,"
             " (SELECT COUNT(*) FROM segments s WHERE s.meeting_id=k.meeting_id"
             "   AND s.speaker_key=k.speaker_key) AS n_segments"
             " FROM speakers k LEFT JOIN people p ON p.id=k.person_id"
@@ -510,7 +510,7 @@ class Store:
         """人物庫的比對用群心。只回傳同一個嵌入模型建立的人物。"""
         out: list[tuple[int, str, np.ndarray]] = []
         for row in self._db.execute(
-            "SELECT id, name FROM people WHERE embed_model=?", (embed_model,)
+            "SELECT id, name, uid FROM people WHERE embed_model=?", (embed_model,)
         ).fetchall():
             vr = self._db.execute(
                 "SELECT vector FROM person_vectors WHERE person_id=?", (row["id"],)).fetchall()
@@ -519,7 +519,8 @@ class Store:
             mat = np.stack([_unblob(x["vector"]) for x in vr])
             c = mat.mean(axis=0)
             n = np.linalg.norm(c)
-            out.append((int(row["id"]), row["name"], c / n if n else c))
+            label = row["name"] or f"訪客 {row['uid']}"
+            out.append((int(row["id"]), label, c / n if n else c))
         return out
 
     # ---------- 匯出／匯入 ----------

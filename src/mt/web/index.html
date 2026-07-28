@@ -615,6 +615,8 @@ function speakerLabel(key, track) {
   const sp = S.speakers.find(s => s.speaker_key === key);
   const name = sp && (sp.label || sp.person_name);
   if (name) return name;
+  // 已經是跨會議的人物、只是還沒命名。露出 uid 才知道下一場的「他」是同一個人。
+  if (sp && sp.person_uid) return `訪客 ${sp.person_uid}`;
   if (!key) return '未分群';
   // 系統音訊那一軌的代號帶 R 前綴（RA / RB），顯示時拿掉並標成「遠端」
   const t = track || (sp && sp.track) || 'mic';

@@ -45,6 +45,8 @@ SYSTEM = "system"
 # 記憶體模式的待處理上限。超過就讓 VAD 執行緒等，形成反壓 ——
 # 代價是上游的音訊佇列最終會滿而丟資料。錄音模式不受這個限制。
 MEM_PENDING = 32
+# 成為新永久人物的最低證據長度（ms）。跟分群的 min_new_speaker_ms 同一個道理。
+MIN_SPEAKER_MS = 2000
 _EMPTY = np.zeros(0, dtype=np.float32)
 
 # 每一軌的說話者代號前綴，避免兩軌撞號。
@@ -400,10 +402,58 @@ class Session:
             self._spool_dir = None
         with self._spool_lock:
             self._spool_files = self._spool_bytes = 0
+        if self.cfg.enable_diarization and self.meeting_id is not None:
+            try:
+                self._promote_speakers()
+            except Exception:
+                self._emit({"type": "error", "where": "promote",
+                            "detail": traceback.format_exc()})
+
         self._emit({"type": "stopped", "meeting_id": self.meeting_id,
                     "stats": dict(self.stats)})
         self._tracks = {}
         self._mic = None
+
+    def _promote_speakers(self) -> None:
+        """把這場的每個說話者群變成跨會議的人物，沒命名的也要。
+
+        不做的話陌生人只存在於這一場，下次同一個聲音又是全新的說話者。
+        比對門檻沿用 person_threshold —— 認錯人的代價比多開一個人物高。
+
+        證據不足的群只允許配對到既有人物，不允許開新的：拿一句短話的聲紋建立
+        永久人物，之後每一場都會拿它去比對，錯誤會一直擴散下去。
+        """
+        mid = self.meeting_id
+        assert mid is not None
+        people = self.store.person_centroids(EMBED_TAG)
+        for sp in self.store.speakers(mid):
+            key = sp["speaker_key"]
+            vecs = self.store.speaker_vectors(mid, key)
+            if not len(vecs):
+                continue
+            cen = vecs.mean(axis=0)
+            n = float(np.linalg.norm(cen))
+            if n:
+                cen = cen / n
+            pid = sp["person_id"]
+            if pid is None:
+                scored = sorted(((float(np.dot(cen, c)), p) for p, _, c in people), reverse=True)
+                if scored and scored[0][0] >= self.cfg.person_threshold:
+                    pid = scored[0][1]
+                elif self._enough_for_new_person(mid, key, vecs):
+                    pid = self.store.create_person(EMBED_TAG, EMBED_DIM)["id"]
+                    people = self.store.person_centroids(EMBED_TAG)
+                else:
+                    continue
+            self.store.link_speaker(mid, key, int(pid), vecs, EMBED_TAG, EMBED_DIM)
+
+    def _enough_for_new_person(self, mid: int, key: str, vecs) -> bool:
+        """至少兩句、而且總長超過一句的門檻，才夠資格成為新的永久人物。"""
+        if len(vecs) < 2:
+            return False
+        ids = [g.id for g in self.store.segments(mid) if g.speaker_key == key]
+        total = sum(self.store.segment_durations(mid, ids)) if ids else 0
+        return total >= 2 * MIN_SPEAKER_MS
 
     def update_config(self, **kw) -> None:
         """錄音中也能改：換模型、調門檻、加減比對模型。下一句就生效。
