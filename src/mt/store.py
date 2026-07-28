@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -82,9 +83,12 @@ CREATE TABLE IF NOT EXISTS speakers (
 );
 
 -- 人物庫：跨會議的長久記憶。
+-- 身分是 uid 而不是名字：名字只是標籤，可以重複、可以改，uid 建立後永不變。
+-- 匯入匯出、跨機器合併都以 uid 為準。name 為空代表還沒命名的人（陌生人）。
 CREATE TABLE IF NOT EXISTS people (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
+    uid         TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL DEFAULT '',
     embed_model TEXT NOT NULL,
     dim         INTEGER NOT NULL,
     created_at  REAL NOT NULL,
@@ -102,6 +106,11 @@ CREATE TABLE IF NOT EXISTS person_vectors (
 );
 CREATE INDEX IF NOT EXISTS idx_pv_person ON person_vectors(person_id);
 """
+
+
+def new_uid() -> str:
+    """人物的永久識別碼。8 個 hex 夠短到可以顯示給使用者看。"""
+    return secrets.token_hex(4)
 
 
 def _blob(v: np.ndarray) -> bytes:
@@ -148,6 +157,46 @@ class Store:
         if "pinned" not in have:
             self._db.execute(
                 "ALTER TABLE meetings ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        self._migrate_people_uid()
+
+    def _migrate_people_uid(self) -> None:
+        """people 從「名字當身分」改成「uid 當身分」，並讓 name 可以重複。
+
+        拿掉 name 的 UNIQUE 只能重建表格。三張表用外鍵指著 people(id)，
+        所以整段必須關掉外鍵檢查再做 —— 否則 DROP TABLE 會連帶清掉聲紋向量。
+        id 保持不變，外鍵引用因此仍然有效。
+        """
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(people)")}
+        if not cols or "uid" in cols:
+            return
+        self._db.commit()
+        self._db.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self._db.execute("BEGIN")
+            self._db.execute("""
+                CREATE TABLE people_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uid         TEXT NOT NULL UNIQUE,
+                    name        TEXT NOT NULL DEFAULT '',
+                    embed_model TEXT NOT NULL,
+                    dim         INTEGER NOT NULL,
+                    created_at  REAL NOT NULL,
+                    updated_at  REAL NOT NULL
+                )""")
+            for r in self._db.execute("SELECT * FROM people").fetchall():
+                self._db.execute(
+                    "INSERT INTO people_new (id, uid, name, embed_model, dim,"
+                    " created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (r["id"], new_uid(), r["name"], r["embed_model"], r["dim"],
+                     r["created_at"], r["updated_at"]))
+            self._db.execute("DROP TABLE people")
+            self._db.execute("ALTER TABLE people_new RENAME TO people")
+            self._db.execute("COMMIT")
+        except Exception:
+            self._db.execute("ROLLBACK")
+            raise
+        finally:
+            self._db.execute("PRAGMA foreign_keys = ON")
 
     def close(self) -> None:
         self._db.close()
@@ -366,14 +415,23 @@ class Store:
         model, dim = meeting["embed_model"], meeting["embed_dim"]
         now = time.time()
 
-        row = self._db.execute("SELECT * FROM people WHERE name=?", (name,)).fetchone()
+        # 身分是 uid：這個群已經連到某個人就改那個人的名字，不要因為同名而合併到
+        # 另一個人身上。要合併是另一件事，不該是「打了同樣的字」的副作用。
+        linked = self._db.execute(
+            "SELECT person_id FROM speakers WHERE meeting_id=? AND speaker_key=?",
+            (meeting_id, speaker_key)).fetchone()
+        row = None
+        if linked and linked["person_id"] is not None:
+            row = self._db.execute("SELECT * FROM people WHERE id=?",
+                                   (linked["person_id"],)).fetchone()
         if row is None:
             cur = self._db.execute(
-                "INSERT INTO people (name, embed_model, dim, created_at, updated_at)"
-                " VALUES (?,?,?,?,?)", (name, model, dim, now, now))
+                "INSERT INTO people (uid, name, embed_model, dim, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?)", (new_uid(), name, model, dim, now, now))
             person_id = int(cur.lastrowid)
         else:
             person_id = int(row["id"])
+            self._db.execute("UPDATE people SET name=? WHERE id=?", (name, person_id))
             if row["embed_model"] != model:
                 # 換過模型：舊向量不可用也無法轉換，這是已知且接受的代價，
                 # 但必須明講而不是默默混用兩種模型的向量。
@@ -382,10 +440,7 @@ class Store:
                     f"目前是 {model}。請先重建該人物的聲紋。")
             self._db.execute("UPDATE people SET updated_at=? WHERE id=?", (now, person_id))
 
-        for v in vecs:
-            self._db.execute(
-                "INSERT INTO person_vectors (person_id, model, dim, vector, src_meeting, created_at)"
-                " VALUES (?,?,?,?,?,?)", (person_id, model, dim, _blob(v), meeting_id, now))
+        self._sync_person_vectors(person_id, meeting_id, model, dim, vecs)
 
         self._db.execute("INSERT OR IGNORE INTO speakers (meeting_id, speaker_key) VALUES (?,?)",
                          (meeting_id, speaker_key))
@@ -393,6 +448,32 @@ class Store:
                          (name, person_id, meeting_id, speaker_key))
         self._db.commit()
         return {"person_id": person_id, "name": name, "n_vectors_added": int(len(vecs))}
+
+    def _sync_person_vectors(self, person_id: int, meeting_id: int, model: str,
+                             dim: int, vecs) -> None:
+        """把某人在某場會議的聲紋換成 vecs。
+
+        先刪再寫而不是一律 append：這個函式在會議進行中會被同一個群反覆呼叫，
+        直接 append 會讓向量數隨句數平方成長。
+        """
+        self._db.execute("DELETE FROM person_vectors WHERE person_id=? AND src_meeting=?",
+                         (person_id, meeting_id))
+        now = time.time()
+        for v in vecs:
+            self._db.execute(
+                "INSERT INTO person_vectors (person_id, model, dim, vector, src_meeting,"
+                " created_at) VALUES (?,?,?,?,?,?)",
+                (person_id, model, dim, _blob(v), meeting_id, now))
+
+    def create_person(self, embed_model: str, dim: int, name: str = "") -> dict:
+        """開一個新人物。name 留空就是還沒命名的陌生人。"""
+        now = time.time()
+        cur = self._db.execute(
+            "INSERT INTO people (uid, name, embed_model, dim, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?)", (new_uid(), name, embed_model, dim, now, now))
+        self._db.commit()
+        return dict(self._db.execute("SELECT * FROM people WHERE id=?",
+                                     (int(cur.lastrowid),)).fetchone())
 
     def list_people(self) -> list[dict]:
         rows = self._db.execute(
@@ -449,6 +530,7 @@ class Store:
                 "SELECT vector, src_meeting, created_at FROM person_vectors WHERE person_id=?",
                 (r["id"],)).fetchall()
             people.append({
+                "uid": r["uid"],
                 "name": r["name"],
                 "embed_model": r["embed_model"],   # 陷阱二：版本欄位不可省
                 "dim": r["dim"],
@@ -462,36 +544,87 @@ class Store:
             "people": people,
         }
 
-    def import_people(self, payload: dict, merge: bool = True) -> dict:
+    def inspect_import(self, payload: dict) -> dict:
+        """匯入前先看會發生什麼，不寫任何東西。
+
+        身分是 uid：同 uid 就是同一個人，直接合併，不必問。
+        uid 是新的但名字撞到既有人物才需要使用者決定 —— 同名不代表同人。
+        """
+        self._check_payload(payload)
+        items = []
+        for p in payload.get("people", []):
+            uid, name, model = p.get("uid", ""), p.get("name", ""), p["embed_model"]
+            mine = self._db.execute("SELECT * FROM people WHERE uid=?", (uid,)).fetchone() if uid else None
+            same_name = self._db.execute(
+                "SELECT * FROM people WHERE name=? AND name!=''", (name,)).fetchall()
+            n_vec = len(p.get("vectors", []))
+            if mine is not None:
+                status = "same" if mine["embed_model"] == model else "blocked"
+            elif same_name:
+                status = "name_conflict" if all(r["embed_model"] == model for r in same_name) else "blocked"
+            else:
+                status = "new"
+            items.append({"uid": uid, "name": name, "embed_model": model, "n_vectors": n_vec,
+                          "status": status,
+                          "existing": [{"uid": r["uid"], "name": r["name"]} for r in same_name]})
+        return {"items": items, "needs_decision": [i for i in items if i["status"] == "name_conflict"]}
+
+    def import_people(self, payload: dict, decisions: dict | None = None) -> dict:
+        """decisions: {來源 uid: "same" | "rename"}。
+
+        same   —— 跟同名的既有人物是同一個人，聲紋合併進去。
+        rename —— 是不同的人，另外建一個；名字照原樣，靠 uid 區分。
+        """
+        self._check_payload(payload)
+        decisions = decisions or {}
+        added, merged, skipped, now = [], [], [], time.time()
+        for p in payload.get("people", []):
+            uid, name = p.get("uid", ""), p.get("name", "")
+            model, dim = p["embed_model"], int(p["dim"])
+            mine = self._db.execute("SELECT * FROM people WHERE uid=?", (uid,)).fetchone() if uid else None
+            if mine is not None:
+                if mine["embed_model"] != model:
+                    skipped.append({"name": name, "uid": uid, "reason": "嵌入模型不同，聲紋無法轉換"})
+                    continue
+                person_id = int(mine["id"])
+                merged.append({"name": name or mine["name"], "uid": mine["uid"]})
+            else:
+                same_name = self._db.execute(
+                    "SELECT * FROM people WHERE name=? AND name!=''", (name,)).fetchall()
+                if same_name and any(r["embed_model"] != model for r in same_name):
+                    skipped.append({"name": name, "uid": uid, "reason": "嵌入模型不同，聲紋無法轉換"})
+                    continue
+                choice = decisions.get(uid)
+                if same_name and choice is None:
+                    skipped.append({"name": name, "uid": uid, "reason": "名稱重複，尚未決定"})
+                    continue
+                if same_name and choice == "same":
+                    person_id = int(same_name[0]["id"])
+                    merged.append({"name": name, "uid": same_name[0]["uid"]})
+                else:
+                    free = uid and not self._db.execute(
+                        "SELECT 1 FROM people WHERE uid=?", (uid,)).fetchone()
+                    use = uid if free else new_uid()
+                    cur = self._db.execute(
+                        "INSERT INTO people (uid, name, embed_model, dim, created_at, updated_at)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (use, name, model, dim, p.get("created_at", now), now))
+                    person_id = int(cur.lastrowid)
+                    added.append({"name": name, "uid": use})
+            for v in p.get("vectors", []):
+                self._db.execute(
+                    "INSERT INTO person_vectors (person_id, model, dim, vector, src_meeting,"
+                    " created_at) VALUES (?,?,?,?,NULL,?)",
+                    (person_id, model, dim, _blob(np.asarray(v, dtype=np.float32)), now))
+        self._db.commit()
+        return {"added": added, "merged": merged, "skipped": skipped}
+
+    def _check_payload(self, payload: dict) -> None:
         if payload.get("format") != "meeting-transcriber/people":
             raise ValueError("不是本工具的人物庫匯出檔")
         if int(payload.get("version", 0)) > self.EXPORT_VERSION:
             raise ValueError(f"匯出檔版本 {payload['version']} 比目前支援的 "
                              f"{self.EXPORT_VERSION} 新，請先更新程式")
-        added, skipped, now = [], [], time.time()
-        for p in payload.get("people", []):
-            name, model, dim = p["name"], p["embed_model"], int(p["dim"])
-            row = self._db.execute("SELECT * FROM people WHERE name=?", (name,)).fetchone()
-            if row is not None:
-                if not merge or row["embed_model"] != model:
-                    skipped.append({"name": name, "reason":
-                                    "已存在且嵌入模型不同" if row["embed_model"] != model else "已存在"})
-                    continue
-                person_id = int(row["id"])
-            else:
-                cur = self._db.execute(
-                    "INSERT INTO people (name, embed_model, dim, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?)", (name, model, dim, p.get("created_at", now), now))
-                person_id = int(cur.lastrowid)
-            for v in p.get("vectors", []):
-                self._db.execute(
-                    "INSERT INTO person_vectors (person_id, model, dim, vector, src_meeting, created_at)"
-                    " VALUES (?,?,?,?,NULL,?)",
-                    (person_id, model, dim, _blob(np.asarray(v, dtype=np.float32)), now))
-            added.append(name)
-        self._db.commit()
-        return {"added": added, "skipped": skipped}
-
     def export_meeting_text(self, meeting_id: int) -> str:
         m = self.get_meeting(meeting_id)
         if m is None:

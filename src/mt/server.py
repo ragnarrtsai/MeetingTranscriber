@@ -379,12 +379,20 @@ def create_app(db_path: Path | str = DB_PATH) -> FastAPI:
         return JSONResponse(payload, headers={
             "Content-Disposition": f'attachment; filename="{name}.json"'})
 
+    @app.post("/api/people/import/inspect")
+    async def inspect_import(req: Request) -> dict:
+        """先回報會發生什麼事，名稱撞到的交給使用者決定，不寫任何東西。"""
+        body = await req.json()
+        try:
+            return store.inspect_import(body.get("payload", body))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
     @app.post("/api/people/import")
     async def import_people(req: Request) -> dict:
         body = await req.json()
-        payload = body.get("payload", body)
         try:
-            r = store.import_people(payload, merge=bool(body.get("merge", True)))
+            r = store.import_people(body.get("payload", body), body.get("decisions"))
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         session.refresh_people()

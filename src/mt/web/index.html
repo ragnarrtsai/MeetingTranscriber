@@ -154,7 +154,13 @@ section.transcript{flex:1;display:flex;flex-direction:column;min-width:0}
   border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
   padding:9px 12px;box-shadow:0 8px 28px rgba(0,0,0,.35);z-index:50;white-space:pre-wrap}
 .toast.bad{border-left-color:var(--bad)}
-.note{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:60;display:flex;
+  align-items:center;justify-content:center;padding:20px}
+.modal .box{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px 16px;max-width:520px;width:100%;max-height:80vh;overflow-y:auto}
+.modal .row.dec{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
+.modal .seg-name{font-weight:600}
+border:1px solid var(--line);border-radius:8px;padding:8px 10px;
   font-size:12px;color:var(--dim);margin-bottom:8px}
 details summary{cursor:pointer;color:var(--dim);font-size:12px}
 </style>
@@ -927,11 +933,12 @@ async function loadPeople() {
     const d = document.createElement('div');
     d.className = 'item';
     d.style.cursor = 'default';
-    d.innerHTML = `<div class="row"><b class="grow">${esc(person.name)}</b>
+    d.innerHTML = `<div class="row"><b class="grow">${esc(person.name) || '<i class="faint">未命名</i>'}</b>
       <button class="sm" data-a="ren">改名</button>
       <button class="sm" data-a="exp">匯出</button>
       <button class="sm danger" data-a="del">刪除</button></div>
       <div class="tiny faint">${person.n_vectors} 段聲紋 · 來自 ${person.n_meetings} 場會議</div>
+      <div class="tiny faint mono" title="永久識別碼。改名不會變，同名的人靠它區分。">uid ${esc(person.uid)}</div>
       <div class="tiny faint mono">${esc(person.embed_model)}</div>`;
     d.querySelector('[data-a=ren]').onclick = async () => {
       const name = prompt('改成什麼名字？', person.name);
@@ -955,15 +962,61 @@ async function loadPeople() {
     inp.onchange = async () => {
       const f = inp.files[0]; if (!f) return;
       try {
-        const r = await api('POST', '/api/people/import',
-          {payload: JSON.parse(await f.text()), merge: true});
-        toast(`匯入 ${r.added.length} 人${r.skipped.length ? `，跳過 ${r.skipped.length} 人：`
-          + r.skipped.map(s => `${s.name}（${s.reason}）`).join('、') : ''}`);
-        loadPeople();
+        const payload = JSON.parse(await f.text());
+        const chk = await api('POST', '/api/people/import/inspect', {payload});
+        let decisions = {};
+        if (chk.needs_decision.length) {
+          decisions = await askImportDecisions(chk.needs_decision);
+          if (!decisions) return;
+        }
+        const r = await api('POST', '/api/people/import', {payload, decisions});
+        const bits = [];
+        if (r.added.length) bits.push(`新增 ${r.added.length} 人`);
+        if (r.merged.length) bits.push(`合併 ${r.merged.length} 人`);
+        if (r.skipped.length) bits.push(`跳過 ${r.skipped.length} 人：`
+          + r.skipped.map(x => `${x.name}（${x.reason}）`).join('、'));
+        toast(bits.join('，') || '沒有變更');
+        loadPeople(); loadMeetings();
       } catch (e) { toast('匯入失敗：' + e.message, true); }
     };
     inp.click();
   };
+}
+
+/* 名稱重複時逐一問：同名不代表同人。回傳 {uid: 'same'|'rename'}，取消回 null。 */
+function askImportDecisions(items) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    wrap.innerHTML = `<div class="box">
+      <b>有 ${items.length} 個名稱跟現有人物重複</b>
+      <div class="note" style="margin:8px 0">名字只是標籤，真正的身分是 uid。
+        選「相同」會把聲紋合併進現有的人；選「重新命名」會另外建一個人，
+        名字照原樣，用不同的 uid 區分。</div>
+      ${items.map((it, i) => `<div class="row dec" style="flex-wrap:wrap">
+        <span class="seg-name grow">${esc(it.name)}
+          <span class="tiny faint mono">匯入 uid ${esc(it.uid)} · ${it.n_vectors} 段聲紋</span></span>
+        <label class="chk"><input type="radio" name="d${i}" value="same" checked><span>相同</span></label>
+        <label class="chk"><input type="radio" name="d${i}" value="rename"><span>重新命名</span></label>
+        <div class="tiny faint" style="flex-basis:100%">現有：${
+          it.existing.map(e => `${esc(e.name)} <span class="mono">${esc(e.uid)}</span>`).join('、')}</div>
+      </div>`).join('')}
+      <div class="row" style="justify-content:flex-end;margin-top:12px">
+        <button data-a="cancel" class="sm">取消</button>
+        <button data-a="ok" class="sm primary">匯入</button>
+      </div></div>`;
+    const done = v => { wrap.remove(); resolve(v); };
+    wrap.querySelector('[data-a=cancel]').onclick = () => done(null);
+    wrap.querySelector('[data-a=ok]').onclick = () => {
+      const out = {};
+      items.forEach((it, i) => {
+        out[it.uid] = wrap.querySelector(`input[name=d${i}]:checked`).value;
+      });
+      done(out);
+    };
+    wrap.onclick = e => { if (e.target === wrap) done(null); };
+    document.body.appendChild(wrap);
+  });
 }
 
 /* ---------------- 逐字稿互動 ---------------- */
